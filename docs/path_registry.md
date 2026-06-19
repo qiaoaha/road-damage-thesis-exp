@@ -106,3 +106,10 @@ Correct main experiment datasets:
 - Abandoned wrong full-real datasets: `/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4/real_plus_*`
 - W&B run root: `/root/autodl-tmp/road_damage_exp/runs_ch4_base80_wandb`
 - Results CSV: `/root/autodl-tmp/road_damage_exp/runs_ch4_base80_wandb/ch4_all_yolos_results.csv`
+
+## Chapter 4 base80 YOLO datasets and W&B runs - 2026-06-20 04:34:23
+
+- Correct dataset root: `/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4_base80`
+- Abandoned wrong full-real datasets: `/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4/real_plus_*`
+- W&B run root: `/root/autodl-tmp/road_damage_exp/runs_ch4_base80_wandb`
+- Results CSV: `/root/autodl-tmp/road_damage_exp/runs_ch4_base80_wandb/ch4_all_yolos_results.csv`

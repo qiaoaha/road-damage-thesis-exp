@@ -1,0 +1,13 @@
+model_family,dataset_variant,run_name,status,batch,best_pt_path,results_csv_path,test_dir,train_precision,train_recall,train_mAP50,train_mAP50_95
+yolov5,base80_only,yolov5_base80_only,completed,16,/root/autodl-tmp/road_damage_exp/runs_ch4_base80_wandb/yolov5/yolov5_base80_only/weights/best.pt,/root/autodl-tmp/road_damage_exp/runs_ch4_base80_wandb/yolov5/yolov5_base80_only/results.csv,/root/autodl-tmp/road_damage_exp/runs_ch4_base80_wandb/yolov5_test/yolov5_base80_only,0.42925,0.32439,0.29719,0.11223
+yolov5,base80_plus_random_200,yolov5_base80_plus_random_200,completed,16,/root/autodl-tmp/road_damage_exp/runs_ch4_base80_wandb/yolov5/yolov5_base80_plus_random_200/weights/best.pt,/root/autodl-tmp/road_damage_exp/runs_ch4_base80_wandb/yolov5/yolov5_base80_plus_random_200/results.csv,/root/autodl-tmp/road_damage_exp/runs_ch4_base80_wandb/yolov5_test/yolov5_base80_plus_random_200,0.69188,0.51594,0.5627,0.24361
+yolov5,base80_plus_lpips_200,yolov5_base80_plus_lpips_200,completed,16,/root/autodl-tmp/road_damage_exp/runs_ch4_base80_wandb/yolov5/yolov5_base80_plus_lpips_200/weights/best.pt,/root/autodl-tmp/road_damage_exp/runs_ch4_base80_wandb/yolov5/yolov5_base80_plus_lpips_200/results.csv,/root/autodl-tmp/road_damage_exp/runs_ch4_base80_wandb/yolov5_test/yolov5_base80_plus_lpips_200,0.63179,0.52082,0.51634,0.2238
+yolov5,base80_plus_ours_200,yolov5_base80_plus_ours_200,missing,,/root/autodl-tmp/road_damage_exp/runs_ch4_base80_wandb/yolov5/yolov5_base80_plus_ours_200/weights/best.pt,/root/autodl-tmp/road_damage_exp/runs_ch4_base80_wandb/yolov5/yolov5_base80_plus_ours_200/results.csv,,0.46778,0.42452,0.39651,0.16149
+yolov8,base80_only,yolov8_base80_only,missing,,,,,,,,
+yolov8,base80_plus_random_200,yolov8_base80_plus_random_200,missing,,,,,,,,
+yolov8,base80_plus_lpips_200,yolov8_base80_plus_lpips_200,missing,,,,,,,,
+yolov8,base80_plus_ours_200,yolov8_base80_plus_ours_200,missing,,,,,,,,
+yolov11,base80_only,yolov11_base80_only,missing,,,,,,,,
+yolov11,base80_plus_random_200,yolov11_base80_plus_random_200,missing,,,,,,,,
+yolov11,base80_plus_lpips_200,yolov11_base80_plus_lpips_200,missing,,,,,,,,
+yolov11,base80_plus_ours_200,yolov11_base80_plus_ours_200,missing,,,,,,,,
