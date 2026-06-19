@@ -16,3 +16,8 @@ If a final `best.pt` is too large or Git LFS is unavailable, record the server p
 Current referenced screening detector:
 
 - `/root/autodl-tmp/road_damage_exp/runs/detect/road_damage_yolov11_aug/road_damage_base80_yolov11/weights/best.pt`
+
+## Chapter 4 W&B run snapshot - 2026-06-20 04:15:05
+
+Weights are kept on the server unless explicitly selected as final thesis weights. Run root: `/root/autodl-tmp/road_damage_exp/runs_ch4_base80_wandb`.
+

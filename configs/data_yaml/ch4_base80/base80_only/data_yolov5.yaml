@@ -1,0 +1,7 @@
+path: /root/autodl-tmp/road_damage_exp/datasets_yolo_ch4_base80/base80_only
+train: images/train
+val: images/val
+test: images/test
+
+nc: 4
+names: ['D00_longitudinal_crack', 'D10_transverse_crack', 'D20_alligator_crack', 'D40_pothole']
