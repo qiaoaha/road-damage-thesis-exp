@@ -1,0 +1,5 @@
+class,class_name,image_count,label_count,pair_match,source_dirs,ready_for_domain_filter
+D00,D00_longitudinal_crack,167,167,True,/root/autodl-tmp/road_damage_exp/screening/sd15_candidates_1000_structure_adaptive,True
+D10,D10_transverse_crack,65,65,True,/root/autodl-tmp/road_damage_exp/screening/sd15_candidates_1000_structure_adaptive,True
+D20,D20_alligator_crack,114,114,True,/root/autodl-tmp/road_damage_exp/screening/sd15_candidates_1000_structure_adaptive,True
+D40,D40_pothole,58,58,True,/root/autodl-tmp/road_damage_exp/screening/d40_merged_structure_candidates,True

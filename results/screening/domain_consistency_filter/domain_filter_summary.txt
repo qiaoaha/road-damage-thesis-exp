@@ -1,0 +1,16 @@
+===== Domain Consistency Filter Summary =====
+Input root: /root/autodl-tmp/road_damage_exp/screening/four_class_structure_candidates
+Real image dir: /root/autodl-tmp/road_damage_exp/processed/real_yolo/images/train
+Real label dir: /root/autodl-tmp/road_damage_exp/processed/real_yolo/labels/train
+Real train images used: 1383
+Real feature failures: 0
+Results CSV: /root/autodl-tmp/road_damage_exp/screening/domain_consistency_filter/domain_filter_results.csv
+By-class summary CSV: /root/autodl-tmp/road_damage_exp/screening/domain_consistency_filter/domain_filter_summary_by_class.csv
+
+D00: input=167, kept=134, images=134, labels=134, pair_match=True, score_mean=0.767203, score_min=0.671838, score_max=0.828599
+D10: input=65, kept=65, images=65, labels=65, pair_match=True, score_mean=0.789868, score_min=0.713847, score_max=0.861896
+D20: input=114, kept=91, images=91, labels=91, pair_match=True, score_mean=0.771847, score_min=0.639040, score_max=0.852823
+D40: input=58, kept=58, images=58, labels=58, pair_match=True, score_mean=0.739334, score_min=0.394910, score_max=0.938222
+
+all_classes_retained_ge_50 = True
+ready_for_diversity_filter = True

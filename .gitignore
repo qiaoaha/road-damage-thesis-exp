@@ -1,0 +1,48 @@
+# image datasets
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.webp
+*.tif
+*.tiff
+images/
+labels/
+datasets/
+raw/
+generated/
+generated_candidates/
+
+# training outputs
+runs/
+wandb/
+.cache/
+tmp/
+temp/
+
+# large model files by default
+*.pth
+*.onnx
+*.engine
+*.safetensors
+*.ckpt
+weights/
+
+# allow selected final YOLO weights
+!final_weights/
+!final_weights/*.pt
+!final_weights/README_weights.md
+
+# python cache
+__pycache__/
+**/__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# credentials
+.env
+*.key
+*.pem
+token*
+secret*
+credentials*
