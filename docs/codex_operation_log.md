@@ -86,3 +86,31 @@
 - Excluded from GitHub: baseline images and labels directories.
 - Success: Yes.
 - GitHub synchronization: completed after commit.
+
+## 2026-06-20 03:54:40 Asia/Shanghai
+
+- Task: Build Chapter 4 YOLO training datasets.
+- Script:
+  - `/root/autodl-tmp/road_damage_exp/build_ch4_yolo_datasets.py`
+  - repository copy: `scripts/dataset_prepare/build_ch4_yolo_datasets.py`
+- Inputs:
+  - `/root/autodl-tmp/road_damage_exp/processed/real_yolo`
+  - `/root/autodl-tmp/road_damage_exp/screening/random_200`
+  - `/root/autodl-tmp/road_damage_exp/screening/lpips_200`
+  - `/root/autodl-tmp/road_damage_exp/screening/final_ours_200`
+- Outputs synchronized:
+  - `configs/data_yaml/*/data.yaml`
+  - `results/dataset_summary/ch4_dataset_summary.csv`
+  - `results/dataset_summary/*/dataset_summary.txt`
+  - `results/dataset_summary/*/dataset_class_distribution.csv`
+  - `results/dataset_summary/*/ready_for_training.txt`
+- Key results:
+  - Each dataset train split has 1583 images and 1583 labels.
+  - Val split remains 296 images and labels.
+  - Test split remains 298 images and labels.
+  - All pair_match checks passed.
+  - Generated labels have no empty label files.
+  - Real empty labels are retained as YOLO negative/no-object samples.
+- Excluded from GitHub: dataset images and labels directories.
+- Success: Yes.
+- GitHub synchronization: completed after commit.

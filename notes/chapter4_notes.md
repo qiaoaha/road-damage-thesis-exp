@@ -30,3 +30,15 @@ Updated: 2026-06-20 03:46:30 Asia/Shanghai
 - Random-200: 50 samples per class, seed 42.
 - LPIPS-200: 50 samples per class, pure LPIPS diversity, backbone `lpips_alex`.
 - Both were sampled from the four-class structure candidate pool.
+
+## Chapter 4 YOLO Dataset Preparation
+
+Updated: 2026-06-20 03:54:40 Asia/Shanghai
+
+Constructed three YOLO datasets for training:
+
+- real_plus_random_200
+- real_plus_lpips_200
+- real_plus_ours_200
+
+All use true val/test splits unchanged and add the corresponding 200 generated samples only to train.

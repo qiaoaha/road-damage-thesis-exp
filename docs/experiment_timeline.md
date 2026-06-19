@@ -21,3 +21,9 @@
 - Built Random-200 baseline from four-class structure candidates.
 - Built LPIPS-200 baseline from four-class structure candidates.
 - Synchronized metadata, summaries, ready flags, scripts, and documentation to GitHub.
+
+## 2026-06-20 03:54:40 Asia/Shanghai
+
+- Built Chapter 4 YOLO training datasets: real_plus_random_200, real_plus_lpips_200, real_plus_ours_200.
+- Real data layout detected as format B: `images/train`, `labels/train`, etc.
+- Validation passed for pair matching, generated train-only placement, valid class IDs, and unchanged val/test counts.

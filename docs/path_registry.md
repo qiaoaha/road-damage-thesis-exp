@@ -66,3 +66,14 @@ Updated: 2026-06-20 03:46:30 Asia/Shanghai
 - LPIPS-200 summary: `/root/autodl-tmp/road_damage_exp/screening/lpips_200/lpips_200_summary.txt`
 - LPIPS-200 images, not uploaded: `/root/autodl-tmp/road_damage_exp/screening/lpips_200/images`
 - LPIPS-200 labels, not uploaded: `/root/autodl-tmp/road_damage_exp/screening/lpips_200/labels`
+
+## Chapter 4 YOLO Training Datasets
+
+Updated: 2026-06-20 03:54:40 Asia/Shanghai
+
+- Output root: `/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4`
+- real_plus_random_200: `/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4/real_plus_random_200`
+- real_plus_lpips_200: `/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4/real_plus_lpips_200`
+- real_plus_ours_200: `/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4/real_plus_ours_200`
+- Summary CSV: `/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4/ch4_dataset_summary.csv`
+- Dataset images and labels are not uploaded to GitHub.

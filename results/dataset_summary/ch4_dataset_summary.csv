@@ -1,0 +1,10 @@
+dataset_name,split,image_count,label_count,bbox_count,D00_bbox,D10_bbox,D20_bbox,D40_bbox,pair_match,empty_real_label_count,empty_aug_label_count,data_yaml_path
+real_plus_random_200,train,1583,1583,3493,1945,830,507,211,True,30,0,/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4/real_plus_random_200/data.yaml
+real_plus_random_200,val,296,296,718,401,161,118,38,True,5,0,/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4/real_plus_random_200/data.yaml
+real_plus_random_200,test,298,298,720,422,177,79,42,True,8,0,/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4/real_plus_random_200/data.yaml
+real_plus_lpips_200,train,1583,1583,3508,1956,825,513,214,True,30,0,/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4/real_plus_lpips_200/data.yaml
+real_plus_lpips_200,val,296,296,718,401,161,118,38,True,5,0,/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4/real_plus_lpips_200/data.yaml
+real_plus_lpips_200,test,298,298,720,422,177,79,42,True,8,0,/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4/real_plus_lpips_200/data.yaml
+real_plus_ours_200,train,1583,1583,3493,1942,823,514,214,True,30,0,/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4/real_plus_ours_200/data.yaml
+real_plus_ours_200,val,296,296,718,401,161,118,38,True,5,0,/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4/real_plus_ours_200/data.yaml
+real_plus_ours_200,test,298,298,720,422,177,79,42,True,8,0,/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4/real_plus_ours_200/data.yaml

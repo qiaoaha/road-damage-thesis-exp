@@ -1,0 +1,13 @@
+===== real_plus_random_200 Dataset Summary =====
+Real root: /root/autodl-tmp/road_damage_exp/processed/real_yolo
+Real layout: B
+Aug root: /root/autodl-tmp/road_damage_exp/screening/random_200
+Aug prefix: random_
+Aug train images added: 200
+Data YAML: /root/autodl-tmp/road_damage_exp/datasets_yolo_ch4/real_plus_random_200/data.yaml
+
+train: images=1583, labels=1583, pair_match=True, bbox=3493, D00=1945, D10=830, D20=507, D40=211, empty_real_labels=30, empty_aug_labels=0
+val: images=296, labels=296, pair_match=True, bbox=718, D00=401, D10=161, D20=118, D40=38, empty_real_labels=5, empty_aug_labels=0
+test: images=298, labels=298, pair_match=True, bbox=720, D00=422, D10=177, D20=79, D40=42, empty_real_labels=8, empty_aug_labels=0
+
+ready_for_training = True
