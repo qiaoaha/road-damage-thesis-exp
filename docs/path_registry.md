@@ -38,3 +38,16 @@ Updated: 2026-06-20 03:23:28 Asia/Shanghai
 - YOLOv11 structure screening best.pt: `/root/autodl-tmp/road_damage_exp/runs/detect/road_damage_yolov11_aug/road_damage_base80_yolov11/weights/best.pt`
 
 Do not upload full datasets, generated image directories, full training runs, wandb caches, or non-final weights.
+
+
+## Ours-200 Final Selection
+
+Updated: 2026-06-20 03:38:56 Asia/Shanghai
+
+- Ours-200 output root: `/root/autodl-tmp/road_damage_exp/screening/final_ours_200`
+- Ours-200 images, not uploaded: `/root/autodl-tmp/road_damage_exp/screening/final_ours_200/images`
+- Ours-200 labels, not uploaded: `/root/autodl-tmp/road_damage_exp/screening/final_ours_200/labels`
+- Ours-200 metadata: `/root/autodl-tmp/road_damage_exp/screening/final_ours_200/metadata_ours_200.csv`
+- Ours-200 summary: `/root/autodl-tmp/road_damage_exp/screening/final_ours_200/ours_200_summary.txt`
+- Ours-200 visualization directory, not uploaded: `/root/autodl-tmp/road_damage_exp/screening/final_ours_200/vis`
+- Ours-200 ready flag: `/root/autodl-tmp/road_damage_exp/screening/final_ours_200/ready_for_yolo_dataset.txt`

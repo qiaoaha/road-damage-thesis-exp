@@ -27,3 +27,37 @@
   - image directories, label directories, generated candidates, visual inspection images, runs, wandb, caches, non-final weights.
 - Success: Yes for local repository and commit preparation.
 - GitHub synchronization: Pending because `gh` is not installed on the server.
+
+
+## 2026-06-20 03:38:56 Asia/Shanghai
+
+- Task: Third-stage domain-constrained LPIPS perceptual diversity selection for Ours-200.
+- Script:
+  - `/root/autodl-tmp/road_damage_exp/select_ours_200_lpips_diversity.py`
+  - repository copy: `scripts/screening/select_ours_200_lpips_diversity.py`
+- Inputs:
+  - `/root/autodl-tmp/road_damage_exp/screening/domain_consistency_filter`
+  - `/root/autodl-tmp/road_damage_exp/screening/domain_consistency_filter/domain_filter_results.csv`
+- Outputs synchronized:
+  - `results/screening/final_ours_200/metadata_ours_200.csv`
+  - `results/screening/final_ours_200/ours_200_summary.txt`
+  - `results/screening/final_ours_200/D00_selected.csv`
+  - `results/screening/final_ours_200/D10_selected.csv`
+  - `results/screening/final_ours_200/D20_selected.csv`
+  - `results/screening/final_ours_200/D40_selected.csv`
+  - `results/screening/final_ours_200/ready_for_yolo_dataset.txt`
+- Key results:
+  - D00 selected 50.
+  - D10 selected 50.
+  - D20 selected 50.
+  - D40 selected 50.
+  - Total images 200, labels 200.
+  - Pair match True.
+  - Label class check passed.
+  - Feature backbone: `lpips_alex`.
+- Excluded from GitHub:
+  - `screening/final_ours_200/images`
+  - `screening/final_ours_200/labels`
+  - `screening/final_ours_200/vis`
+- Success: Yes.
+- GitHub synchronization: completed after commit.

@@ -30,3 +30,18 @@ Pending.
 - Random-200: class-balanced random selection baseline.
 - LPIPS-200: diversity-only selection baseline.
 - Ours-200: structure + domain consistency + LPIPS diversity selection.
+
+
+## Stage 3 Completed: LPIPS Perceptual Diversity Selection
+
+Updated: 2026-06-20 03:38:56 Asia/Shanghai
+
+- Script: `scripts/screening/select_ours_200_lpips_diversity.py`.
+- Input: `/root/autodl-tmp/road_damage_exp/screening/domain_consistency_filter`.
+- Domain CSV: `/root/autodl-tmp/road_damage_exp/screening/domain_consistency_filter/domain_filter_results.csv`.
+- Output: `/root/autodl-tmp/road_damage_exp/screening/final_ours_200`.
+- Feature backbone: `lpips_alex`.
+- Method: Greedy Farthest Point Sampling with Quality Score.
+- Final counts: D00=50, D10=50, D20=50, D40=50.
+- Validation: 200 images, 200 labels, pair matched, label class IDs passed.
+- `ready_for_yolo_dataset = True`.

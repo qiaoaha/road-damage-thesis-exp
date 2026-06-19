@@ -1,0 +1,26 @@
+===== Ours-200 LPIPS Diversity Selection Summary =====
+Input candidate dir: /root/autodl-tmp/road_damage_exp/screening/domain_consistency_filter
+Domain result CSV: /root/autodl-tmp/road_damage_exp/screening/domain_consistency_filter/domain_filter_results.csv
+Output dir: /root/autodl-tmp/road_damage_exp/screening/final_ours_200
+Feature backbone: lpips_alex
+Device: cuda
+Selection method: Greedy Farthest Point Sampling with Quality Score
+
+D00: input_candidates=134, selected=50
+D00: domain_score mean=0.791690, min=0.761700, max=0.828599
+D00: diversity_score mean=0.372826, min=0.000000, max=0.708795
+D10: input_candidates=65, selected=50
+D10: domain_score mean=0.786674, min=0.713847, max=0.861896
+D10: diversity_score mean=0.306777, min=0.000000, max=0.720006
+D20: input_candidates=91, selected=50
+D20: domain_score mean=0.792119, min=0.749754, max=0.852823
+D20: diversity_score mean=0.402095, min=0.000000, max=0.664603
+D40: input_candidates=58, selected=50
+D40: domain_score mean=0.761084, min=0.474886, max=0.938222
+D40: diversity_score mean=0.532765, min=0.000000, max=0.746825
+
+Total images: 200
+Total labels: 200
+Images/labels one-to-one: True
+Label class check: passed
+Successfully generated Ours-200: True
