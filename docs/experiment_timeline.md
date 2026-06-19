@@ -15,3 +15,9 @@
 - Selected 50 samples per class from the domain-consistent candidate pool.
 - Generated metadata, per-class selection CSVs, summary, and ready flag.
 - Contact sheet visualizations were generated on the server but excluded from Git.
+
+## 2026-06-20 03:46:30 Asia/Shanghai
+
+- Built Random-200 baseline from four-class structure candidates.
+- Built LPIPS-200 baseline from four-class structure candidates.
+- Synchronized metadata, summaries, ready flags, scripts, and documentation to GitHub.

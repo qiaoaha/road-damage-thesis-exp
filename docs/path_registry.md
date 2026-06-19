@@ -51,3 +51,18 @@ Updated: 2026-06-20 03:38:56 Asia/Shanghai
 - Ours-200 summary: `/root/autodl-tmp/road_damage_exp/screening/final_ours_200/ours_200_summary.txt`
 - Ours-200 visualization directory, not uploaded: `/root/autodl-tmp/road_damage_exp/screening/final_ours_200/vis`
 - Ours-200 ready flag: `/root/autodl-tmp/road_damage_exp/screening/final_ours_200/ready_for_yolo_dataset.txt`
+
+## Random-200 and LPIPS-200 Baselines
+
+Updated: 2026-06-20 03:46:30 Asia/Shanghai
+
+- Random-200 output root: `/root/autodl-tmp/road_damage_exp/screening/random_200`
+- Random-200 metadata: `/root/autodl-tmp/road_damage_exp/screening/random_200/metadata_random_200.csv`
+- Random-200 summary: `/root/autodl-tmp/road_damage_exp/screening/random_200/random_200_summary.txt`
+- Random-200 images, not uploaded: `/root/autodl-tmp/road_damage_exp/screening/random_200/images`
+- Random-200 labels, not uploaded: `/root/autodl-tmp/road_damage_exp/screening/random_200/labels`
+- LPIPS-200 output root: `/root/autodl-tmp/road_damage_exp/screening/lpips_200`
+- LPIPS-200 metadata: `/root/autodl-tmp/road_damage_exp/screening/lpips_200/metadata_lpips_200.csv`
+- LPIPS-200 summary: `/root/autodl-tmp/road_damage_exp/screening/lpips_200/lpips_200_summary.txt`
+- LPIPS-200 images, not uploaded: `/root/autodl-tmp/road_damage_exp/screening/lpips_200/images`
+- LPIPS-200 labels, not uploaded: `/root/autodl-tmp/road_damage_exp/screening/lpips_200/labels`

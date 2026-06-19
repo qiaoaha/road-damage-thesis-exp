@@ -22,3 +22,11 @@ The final Ours-200 set was generated using domain-constrained LPIPS diversity se
 - D40=50
 - Backbone: `lpips_alex`
 - Ready for YOLO dataset preparation: True
+
+## Random-200 and LPIPS-200 Baselines
+
+Updated: 2026-06-20 03:46:30 Asia/Shanghai
+
+- Random-200: 50 samples per class, seed 42.
+- LPIPS-200: 50 samples per class, pure LPIPS diversity, backbone `lpips_alex`.
+- Both were sampled from the four-class structure candidate pool.

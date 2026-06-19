@@ -59,3 +59,39 @@ D40,50
 - Label class check: passed
 - Feature backbone: `lpips_alex`
 - Purpose: final Chapter 4 Ours-200 augmentation set after structure filtering, domain consistency filtering, and LPIPS diversity selection.
+
+## Random-200 Baseline
+
+Updated: 2026-06-20 03:46:30 Asia/Shanghai
+
+```csv
+class_name,selected_count
+D00,50
+D10,50
+D20,50
+D40,50
+```
+
+- Total images: 200
+- Total labels: 200
+- Pair match: True
+- Label class check: passed
+- Seed: 42
+
+## LPIPS-200 Baseline
+
+Updated: 2026-06-20 03:46:30 Asia/Shanghai
+
+```csv
+class_name,selected_count
+D00,50
+D10,50
+D20,50
+D40,50
+```
+
+- Total images: 200
+- Total labels: 200
+- Pair match: True
+- Label class check: passed
+- Feature backbone: `lpips_alex`

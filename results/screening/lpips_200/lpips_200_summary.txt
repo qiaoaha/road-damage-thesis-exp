@@ -1,0 +1,17 @@
+===== LPIPS-200 Summary =====
+Input root: /root/autodl-tmp/road_damage_exp/screening/four_class_structure_candidates
+Output dir: /root/autodl-tmp/road_damage_exp/screening/lpips_200
+feature_backbone: lpips_alex
+device: cuda
+selection_method: Greedy Farthest Point Sampling
+
+D00: input_candidates=167, selected=50, diversity_mean=0.423535, diversity_min=0.000000, diversity_max=0.782068
+D10: input_candidates=65, selected=50, diversity_mean=0.316332, diversity_min=0.000000, diversity_max=0.732046
+D20: input_candidates=114, selected=50, diversity_mean=0.419134, diversity_min=0.000000, diversity_max=0.621739
+D40: input_candidates=58, selected=50, diversity_mean=0.569082, diversity_min=0.000000, diversity_max=0.877725
+
+Total images: 200
+Total labels: 200
+pair_match: True
+label_class_check: passed
+ready_for_yolo_dataset = True

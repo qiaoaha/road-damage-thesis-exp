@@ -45,3 +45,13 @@ Updated: 2026-06-20 03:38:56 Asia/Shanghai
 - Final counts: D00=50, D10=50, D20=50, D40=50.
 - Validation: 200 images, 200 labels, pair matched, label class IDs passed.
 - `ready_for_yolo_dataset = True`.
+
+## Baselines Completed: Random-200 and LPIPS-200
+
+Updated: 2026-06-20 03:46:30 Asia/Shanghai
+
+Both baselines were constructed from the four-class structure candidate pool, not from the domain consistency pool.
+
+- Random-200: class-balanced random sampling with seed 42, 50 per class.
+- LPIPS-200: per-class Greedy Farthest Point Sampling using `lpips_alex`, 50 per class, no domain_score.
+- Both outputs passed 200 image/label count checks, pair matching, non-empty labels, and class ID validation.

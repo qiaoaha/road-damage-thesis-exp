@@ -61,3 +61,28 @@
   - `screening/final_ours_200/vis`
 - Success: Yes.
 - GitHub synchronization: completed after commit.
+
+## 2026-06-20 03:46:30 Asia/Shanghai
+
+- Task: Build Random-200 and LPIPS-200 baseline selections from four-class structure candidates.
+- Scripts:
+  - `/root/autodl-tmp/road_damage_exp/build_random_lpips_200_baselines.py`
+  - `/root/autodl-tmp/road_damage_exp/build_random_200.py`
+  - `/root/autodl-tmp/road_damage_exp/build_lpips_200.py`
+- Input:
+  - `/root/autodl-tmp/road_damage_exp/screening/four_class_structure_candidates`
+- Outputs synchronized:
+  - `results/screening/random_200/metadata_random_200.csv`
+  - `results/screening/random_200/random_200_summary.txt`
+  - `results/screening/random_200/ready_for_yolo_dataset.txt`
+  - `results/screening/lpips_200/metadata_lpips_200.csv`
+  - `results/screening/lpips_200/lpips_200_summary.txt`
+  - `results/screening/lpips_200/ready_for_yolo_dataset.txt`
+- Key results:
+  - Random-200: D00=50, D10=50, D20=50, D40=50.
+  - LPIPS-200: D00=50, D10=50, D20=50, D40=50.
+  - LPIPS feature backbone: `lpips_alex`.
+  - Both datasets: 200 images, 200 labels, pair_match True, label class check passed.
+- Excluded from GitHub: baseline images and labels directories.
+- Success: Yes.
+- GitHub synchronization: completed after commit.

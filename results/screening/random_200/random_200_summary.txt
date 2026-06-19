@@ -1,0 +1,16 @@
+===== Random-200 Summary =====
+Input root: /root/autodl-tmp/road_damage_exp/screening/four_class_structure_candidates
+Output dir: /root/autodl-tmp/road_damage_exp/screening/random_200
+selection_method: class_balanced_random_sampling
+seed: 42
+
+D00: input_candidates=167, selected=50
+D10: input_candidates=65, selected=50
+D20: input_candidates=114, selected=50
+D40: input_candidates=58, selected=50
+
+Total images: 200
+Total labels: 200
+pair_match: True
+label_class_check: passed
+ready_for_yolo_dataset = True
