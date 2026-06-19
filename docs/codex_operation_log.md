@@ -114,3 +114,34 @@
 - Excluded from GitHub: dataset images and labels directories.
 - Success: Yes.
 - GitHub synchronization: completed after commit.
+
+## 2026-06-20 04:03:07 Asia/Shanghai
+
+- Task: Correct Chapter 4 YOLO datasets to use base80 + generated 200.
+- Abandoned previous datasets:
+  - `/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4/real_plus_random_200`
+  - `/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4/real_plus_lpips_200`
+  - `/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4/real_plus_ours_200`
+- Reason: previous version used full real train 1383 + generated 200.
+- Correct script:
+  - `/root/autodl-tmp/road_damage_exp/build_ch4_base80_yolo_datasets.py`
+  - repository copy: `scripts/dataset_prepare/build_ch4_base80_yolo_datasets.py`
+- Inputs:
+  - base80 YOLO source: `/root/autodl-tmp/road_damage_exp/processed/base80_yolo`
+  - base80 class mapping source: `/root/autodl-tmp/road_damage_exp/base80_upload.tar.gz`
+  - random/lpips/ours generated 200 datasets.
+- Outputs synchronized:
+  - `configs/data_yaml/base80_plus_*/data.yaml`
+  - `results/dataset_summary/ch4_base80_dataset_summary.csv`
+  - `results/dataset_summary/base80_plus_*/dataset_summary.txt`
+  - `results/dataset_summary/base80_plus_*/dataset_class_distribution.csv`
+  - `results/dataset_summary/base80_plus_*/ready_for_training.txt`
+- Key results:
+  - Each corrected train split has 280 images and 280 labels.
+  - Base80 target counts: D00=20, D10=20, D20=20, D40=20.
+  - Generated target counts: D00=50, D10=50, D20=50, D40=50.
+  - Val/test remain 296/298 real images and labels.
+  - All corrected datasets ready_for_training=True.
+- Excluded from GitHub: images and labels directories.
+- Success: Yes.
+- GitHub synchronization: completed after commit.

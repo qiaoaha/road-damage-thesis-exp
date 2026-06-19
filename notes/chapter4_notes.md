@@ -42,3 +42,9 @@ Constructed three YOLO datasets for training:
 - real_plus_ours_200
 
 All use true val/test splits unchanged and add the corresponding 200 generated samples only to train.
+
+## Correction: Base80 Plus Generated Training Sets
+
+Updated: 2026-06-20 04:03:07 Asia/Shanghai
+
+The earlier `real_plus_*` datasets are not used in Chapter 4 main experiments because they included the full 1383-image real train split. Correct training sets are `base80_plus_*`, each with 80 real base images and 200 generated images.

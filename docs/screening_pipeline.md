@@ -55,3 +55,14 @@ Both baselines were constructed from the four-class structure candidate pool, no
 - Random-200: class-balanced random sampling with seed 42, 50 per class.
 - LPIPS-200: per-class Greedy Farthest Point Sampling using `lpips_alex`, 50 per class, no domain_score.
 - Both outputs passed 200 image/label count checks, pair matching, non-empty labels, and class ID validation.
+
+## Dataset Preparation Correction
+
+Updated: 2026-06-20 04:03:07 Asia/Shanghai
+
+The Chapter 4 main training datasets must use base80 + generated 200, not full real train + generated 200.
+
+- `datasets_yolo_ch4/real_plus_*`: abandoned / wrong_full_real_plus_generated.
+- `datasets_yolo_ch4_base80/base80_plus_*`: corrected main experiment datasets.
+- Train split: 80 base real images + 200 generated images = 280 images.
+- Val/test splits: unchanged real validation and test splits.

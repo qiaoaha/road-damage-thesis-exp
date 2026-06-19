@@ -114,3 +114,24 @@ real_plus_ours_200,test,298,298,720,422,177,79,42,True,8,0,/root/autodl-tmp/road
 ```
 
 Note: empty real labels are retained as YOLO negative/no-object samples to preserve the original train/val/test splits. Generated augmentation labels have `empty_aug_label_count = 0`.
+
+## Correction: Chapter 4 Base80 YOLO Datasets
+
+Updated: 2026-06-20 04:03:07 Asia/Shanghai
+
+Old full-real-plus-generated datasets are abandoned for the Chapter 4 main experiment. Correct datasets use 80 real base images plus 200 generated images.
+
+Base80 target class counts are read from `base80_upload.tar.gz` class directories: D00=20, D10=20, D20=20, D40=20. Labels are matched from `processed/base80_yolo`.
+
+```csv
+dataset_name,split,image_count,label_count,empty_label_count,bbox_count,D00_bbox,D10_bbox,D20_bbox,D40_bbox,base80_image_count,generated_image_count,pair_match,data_yaml_path,ready_for_training
+base80_plus_random_200,train,280,280,0,420,137,105,94,84,80,200,True,/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4_base80/base80_plus_random_200/data.yaml,True
+base80_plus_random_200,val,296,296,5,718,401,161,118,38,0,0,True,/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4_base80/base80_plus_random_200/data.yaml,True
+base80_plus_random_200,test,298,298,8,720,422,177,79,42,0,0,True,/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4_base80/base80_plus_random_200/data.yaml,True
+base80_plus_lpips_200,train,280,280,0,435,148,100,100,87,80,200,True,/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4_base80/base80_plus_lpips_200/data.yaml,True
+base80_plus_lpips_200,val,296,296,5,718,401,161,118,38,0,0,True,/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4_base80/base80_plus_lpips_200/data.yaml,True
+base80_plus_lpips_200,test,298,298,8,720,422,177,79,42,0,0,True,/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4_base80/base80_plus_lpips_200/data.yaml,True
+base80_plus_ours_200,train,280,280,0,420,134,98,101,87,80,200,True,/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4_base80/base80_plus_ours_200/data.yaml,True
+base80_plus_ours_200,val,296,296,5,718,401,161,118,38,0,0,True,/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4_base80/base80_plus_ours_200/data.yaml,True
+base80_plus_ours_200,test,298,298,8,720,422,177,79,42,0,0,True,/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4_base80/base80_plus_ours_200/data.yaml,True
+```

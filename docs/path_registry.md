@@ -77,3 +77,25 @@ Updated: 2026-06-20 03:54:40 Asia/Shanghai
 - real_plus_ours_200: `/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4/real_plus_ours_200`
 - Summary CSV: `/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4/ch4_dataset_summary.csv`
 - Dataset images and labels are not uploaded to GitHub.
+
+## Correction: Chapter 4 Base80 YOLO Training Datasets
+
+Updated: 2026-06-20 04:03:07 Asia/Shanghai
+
+Abandoned wrong version:
+
+- `/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4/real_plus_random_200`
+- `/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4/real_plus_lpips_200`
+- `/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4/real_plus_ours_200`
+
+Reason: these used full real train 1383 + generated 200, so they are marked `abandoned / wrong_full_real_plus_generated` and are not used for Chapter 4 main experiments.
+
+Correct main experiment datasets:
+
+- `/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4_base80/base80_plus_random_200`
+- `/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4_base80/base80_plus_lpips_200`
+- `/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4_base80/base80_plus_ours_200`
+
+- Base80 YOLO source: `/root/autodl-tmp/road_damage_exp/processed/base80_yolo`
+- Base80 target-class source: `/root/autodl-tmp/road_damage_exp/base80_upload.tar.gz`
+- Summary CSV: `/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4_base80/ch4_base80_dataset_summary.csv`

@@ -27,3 +27,9 @@
 - Built Chapter 4 YOLO training datasets: real_plus_random_200, real_plus_lpips_200, real_plus_ours_200.
 - Real data layout detected as format B: `images/train`, `labels/train`, etc.
 - Validation passed for pair matching, generated train-only placement, valid class IDs, and unchanged val/test counts.
+
+## 2026-06-20 04:03:07 Asia/Shanghai
+
+- Corrected Chapter 4 YOLO dataset construction from full-real-plus-generated to base80-plus-generated.
+- Marked old `real_plus_*` datasets as abandoned/wrong_full_real_plus_generated in documentation.
+- Built corrected `base80_plus_random_200`, `base80_plus_lpips_200`, and `base80_plus_ours_200`.
