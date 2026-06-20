@@ -135,3 +135,17 @@ base80_plus_ours_200,train,280,280,0,420,134,98,101,87,80,200,True,/root/autodl-
 base80_plus_ours_200,val,296,296,5,718,401,161,118,38,0,0,True,/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4_base80/base80_plus_ours_200/data.yaml,True
 base80_plus_ours_200,test,298,298,8,720,422,177,79,42,0,0,True,/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4_base80/base80_plus_ours_200/data.yaml,True
 ```
+
+## Chapter 4 Cross-Domain Test Datasets
+
+Updated: 2026-06-20 14:50:31 Asia/Shanghai
+
+```csv
+domain,image_count,label_count,empty_label_count,bbox_count,D00_bbox,D10_bbox,D20_bbox,D40_bbox,filtered_other_bbox_count,pair_match,valid_label_classes,bbox_coords_valid
+Japan,500,500,0,1308,306,372,402,228,354,True,True,True
+Norway,500,500,0,2876,1931,438,258,249,0,True,True,True
+```
+
+- Purpose: target-domain test sets for Chapter 4 YOLOv11 cross-domain generalization analysis.
+- Source train domain for evaluated models: China.
+- Label policy: only D00, D10, D20, and D40 are retained; other RDD labels are filtered.

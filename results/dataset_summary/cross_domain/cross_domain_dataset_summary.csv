@@ -1,0 +1,3 @@
+domain,raw_dir,yolo_dir,data_yaml,image_count,label_count,empty_label_count,bbox_count,D00_bbox,D10_bbox,D20_bbox,D40_bbox,filtered_other_bbox_count,pair_match,valid_label_classes,bbox_coords_valid
+Japan,/root/autodl-tmp/road_damage_exp/cross_domain/Japan_eval_500_raw,/root/autodl-tmp/road_damage_exp/datasets_cross_domain/japan_yolo,/root/autodl-tmp/road_damage_exp/datasets_cross_domain/japan_yolo/data.yaml,500,500,0,1308,306,372,402,228,354,True,True,True
+Norway,/root/autodl-tmp/road_damage_exp/cross_domain/Norway_eval_500_raw,/root/autodl-tmp/road_damage_exp/datasets_cross_domain/norway_yolo,/root/autodl-tmp/road_damage_exp/datasets_cross_domain/norway_yolo/data.yaml,500,500,0,2876,1931,438,258,249,0,True,True,True

@@ -120,3 +120,17 @@ Correct main experiment datasets:
 - Abandoned wrong full-real datasets: `/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4/real_plus_*`
 - W&B run root: `/root/autodl-tmp/road_damage_exp/runs_ch4_base80_wandb`
 - Results CSV: `/root/autodl-tmp/road_damage_exp/runs_ch4_base80_wandb/ch4_all_yolos_results.csv`
+
+## Chapter 4 YOLOv11 Cross-Domain Evaluation - 2026-06-20 14:50:31 Asia/Shanghai
+
+- Cross-domain raw Japan data: `/root/autodl-tmp/road_damage_exp/cross_domain/Japan_eval_500_raw`
+- Cross-domain raw Norway data: `/root/autodl-tmp/road_damage_exp/cross_domain/Norway_eval_500_raw`
+- Cross-domain YOLO dataset root: `/root/autodl-tmp/road_damage_exp/datasets_cross_domain`
+- Japan YOLO test dataset: `/root/autodl-tmp/road_damage_exp/datasets_cross_domain/japan_yolo`
+- Norway YOLO test dataset: `/root/autodl-tmp/road_damage_exp/datasets_cross_domain/norway_yolo`
+- Dataset summary CSV: `/root/autodl-tmp/road_damage_exp/datasets_cross_domain/cross_domain_dataset_summary.csv`
+- Cross-domain test output root: `/root/autodl-tmp/road_damage_exp/runs_ch4_cross_domain_yolov11`
+- Cross-domain results CSV: `/root/autodl-tmp/road_damage_exp/runs_ch4_cross_domain_yolov11/ch4_cross_domain_yolov11_results.csv`
+- Cross-domain results Markdown: `/root/autodl-tmp/road_damage_exp/runs_ch4_cross_domain_yolov11/ch4_cross_domain_yolov11_results.md`
+- W&B project: `road_damage_ch4_cross_domain_yolov11`
+- Note: cross-domain evaluation intentionally uses YOLOv11 only; YOLOv5 and YOLOv8 are not used in this stage.

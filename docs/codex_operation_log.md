@@ -166,3 +166,33 @@
 - Dataset root: `/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4_base80`
 - Run root: `/root/autodl-tmp/road_damage_exp/runs_ch4_base80_wandb`
 - GitHub sync: attempted by server-side script
+
+## 2026-06-20 14:50:31 Asia/Shanghai Chapter 4 YOLOv11 cross-domain evaluation
+
+- Task: Build/verify Japan and Norway YOLO test datasets, then run YOLOv11-only cross-domain validation.
+- Scripts:
+  - `/root/autodl-tmp/road_damage_exp/build_cross_domain_yolo_datasets.py`
+  - `/root/autodl-tmp/road_damage_exp/run_ch4_cross_domain_yolov11_tests.py`
+  - `/root/autodl-tmp/road_damage_exp/collect_ch4_cross_domain_yolov11_results.py`
+- Inputs:
+  - YOLOv11 best.pt checkpoints under `/root/autodl-tmp/road_damage_exp/runs_ch4_base80_wandb/yolov11`
+  - Japan raw data: `/root/autodl-tmp/road_damage_exp/cross_domain/Japan_eval_500_raw`
+  - Norway raw data: `/root/autodl-tmp/road_damage_exp/cross_domain/Norway_eval_500_raw`
+- Outputs synchronized:
+  - `scripts/dataset_prepare/build_cross_domain_yolo_datasets.py`
+  - `scripts/eval/run_ch4_cross_domain_yolov11_tests.py`
+  - `scripts/eval/collect_ch4_cross_domain_yolov11_results.py`
+  - `results/dataset_summary/cross_domain/cross_domain_dataset_summary.csv`
+  - `results/cross_domain_eval/ch4_cross_domain_yolov11_results.csv`
+  - `results/cross_domain_eval/ch4_cross_domain_yolov11_results.md`
+  - `results/cross_domain_eval/ch4_cross_domain_yolov11_status.jsonl`
+  - `configs/data_yaml/cross_domain/*/data.yaml`
+- Key results:
+  - Japan test set: 500 images, 1308 retained four-class boxes.
+  - Norway test set: 500 images, 2876 retained four-class boxes.
+  - Completed 8/8 YOLOv11-only validation runs.
+  - W&B project: `road_damage_ch4_cross_domain_yolov11`.
+  - YOLOv5/YOLOv8 were intentionally excluded from cross-domain evaluation.
+- Excluded from GitHub: cross-domain images, labels, validation prediction plots, run media, model weights, and W&B cache.
+- Success: Yes.
+- GitHub synchronization: completed after commit.
