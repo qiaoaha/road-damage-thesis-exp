@@ -134,3 +134,14 @@ Correct main experiment datasets:
 - Cross-domain results Markdown: `/root/autodl-tmp/road_damage_exp/runs_ch4_cross_domain_yolov11/ch4_cross_domain_yolov11_results.md`
 - W&B project: `road_damage_ch4_cross_domain_yolov11`
 - Note: cross-domain evaluation intentionally uses YOLOv11 only; YOLOv5 and YOLOv8 are not used in this stage.
+
+## Chapter 4 Cross-Domain Sanity Check - 2026-06-20 15:06:01 Asia/Shanghai
+
+- Sanity check root: `/root/autodl-tmp/road_damage_exp/runs_ch4_cross_domain_yolov11/sanity_check`
+- Label sanity CSV: `/root/autodl-tmp/road_damage_exp/runs_ch4_cross_domain_yolov11/sanity_check/cross_domain_label_sanity.csv`
+- Ours prediction distribution CSV: `/root/autodl-tmp/road_damage_exp/runs_ch4_cross_domain_yolov11/sanity_check/prediction_distribution_ours.csv`
+- Full-real sanity CSV: `/root/autodl-tmp/road_damage_exp/runs_ch4_cross_domain_yolov11/sanity_check/fullreal_yolov11_cross_domain_results.csv`
+- Full-real sanity Markdown: `/root/autodl-tmp/road_damage_exp/runs_ch4_cross_domain_yolov11/sanity_check/fullreal_yolov11_cross_domain_results.md`
+- Sanity report: `/root/autodl-tmp/road_damage_exp/runs_ch4_cross_domain_yolov11/sanity_check/cross_domain_sanity_report.md`
+- GT visualization directory, not uploaded: `/root/autodl-tmp/road_damage_exp/runs_ch4_cross_domain_yolov11/sanity_check/gt_vis`
+- Prediction visualization directory, not uploaded: `/root/autodl-tmp/road_damage_exp/runs_ch4_cross_domain_yolov11/sanity_check/pred_vis`

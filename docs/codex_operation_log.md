@@ -196,3 +196,29 @@
 - Excluded from GitHub: cross-domain images, labels, validation prediction plots, run media, model weights, and W&B cache.
 - Success: Yes.
 - GitHub synchronization: completed after commit.
+
+## 2026-06-20 15:06:01 Asia/Shanghai Chapter 4 cross-domain sanity check
+
+- Task: Diagnose low YOLOv11-only Japan/Norway cross-domain metrics without retraining.
+- Script:
+  - `/root/autodl-tmp/road_damage_exp/cross_domain_sanity_check_yolov11.py`
+- Inputs:
+  - Japan YOLO test dataset: `/root/autodl-tmp/road_damage_exp/datasets_cross_domain/japan_yolo`
+  - Norway YOLO test dataset: `/root/autodl-tmp/road_damage_exp/datasets_cross_domain/norway_yolo`
+  - Ours YOLOv11 weight: `/root/autodl-tmp/road_damage_exp/runs_ch4_base80_wandb/yolov11/yolov11_base80_plus_ours_200/weights/best.pt`
+  - Full-real/real-only sanity weight: `/root/autodl-tmp/road_damage_exp/runs/detect/road_damage_yolov11_aug/road_damage_base80_yolov11/weights/best.pt`
+- Outputs synchronized:
+  - `scripts/eval/cross_domain_sanity_check_yolov11.py`
+  - `results/cross_domain_eval/sanity_check/cross_domain_label_sanity.csv`
+  - `results/cross_domain_eval/sanity_check/prediction_distribution_ours.csv`
+  - `results/cross_domain_eval/sanity_check/fullreal_yolov11_cross_domain_results.csv`
+  - `results/cross_domain_eval/sanity_check/fullreal_yolov11_cross_domain_results.md`
+  - `results/cross_domain_eval/sanity_check/cross_domain_sanity_report.md`
+- Key results:
+  - Japan/Norway labels are legal: pair_match=True, illegal_class=0, coord_oob=0, nonpositive_wh=0.
+  - Ours is not empty at low confidence, but high-confidence predictions are sparse.
+  - Full-real YOLOv11 is also low: Japan mAP50=0.0587, Norway mAP50=0.0130.
+  - Most likely cause recorded as mixed: severe cross-domain shift plus small-sample generalization limits; no hard label conversion error found.
+- Excluded from GitHub: original images, labels, visualization jpg files, runs directories, weights, and W&B cache.
+- Success: Yes.
+- GitHub synchronization: completed after commit.
