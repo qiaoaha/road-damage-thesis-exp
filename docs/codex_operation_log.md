@@ -159,3 +159,10 @@
 - Dataset root: `/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4_base80`
 - Run root: `/root/autodl-tmp/road_damage_exp/runs_ch4_base80_wandb`
 - GitHub sync: attempted by server-side script
+
+## 2026-06-20 14:27:29 Chapter 4 YOLO W&B training sync
+
+- Scripts: `build_ch4_base80_only_and_yolov5_yaml.py, run_ch4_all_yolos_wandb.py, collect_ch4_all_yolos_wandb_results.py, log_ch4_results_to_wandb.py, sync_ch4_training_to_github.py`
+- Dataset root: `/root/autodl-tmp/road_damage_exp/datasets_yolo_ch4_base80`
+- Run root: `/root/autodl-tmp/road_damage_exp/runs_ch4_base80_wandb`
+- GitHub sync: attempted by server-side script

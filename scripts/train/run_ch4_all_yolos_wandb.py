@@ -77,24 +77,51 @@ def status(row):
     with STATUS_PATH.open('a', encoding='utf-8') as f:
         f.write(json.dumps(row, ensure_ascii=False) + '\n')
 
-def experiment_done(fam, run_name):
+def artifact_state(fam, run_name):
     train_dir = RUN_ROOT / fam / run_name
     test_dir = RUN_ROOT / f'{fam}_test' / run_name
-    best = train_dir / 'weights/best.pt'
-    results = train_dir / 'results.csv'
-    return best.exists() and (results.exists() or test_dir.exists())
+    return {
+        'train_dir': train_dir,
+        'test_dir': test_dir,
+        'best': train_dir / 'weights/best.pt',
+        'last': train_dir / 'weights/last.pt',
+        'results': train_dir / 'results.csv',
+        'test_exists': test_dir.exists(),
+    }
 
+def experiment_done(fam, run_name):
+    st = artifact_state(fam, run_name)
+    return st['best'].exists() and st['last'].exists() and st['results'].exists() and st['test_exists']
+
+def has_train_artifacts(fam, run_name):
+    st = artifact_state(fam, run_name)
+    return st['best'].exists() and st['results'].exists()
+
+def has_resume_artifact(fam, run_name):
+    st = artifact_state(fam, run_name)
+    return st['last'].exists() and not st['results'].exists()
 def train_yolov5(dataset_name, dataset_path, batch):
     run_name = f'yolov5_{dataset_name}'
+    data = dataset_path / 'data_yolov5.yaml'
+    env = env_for(run_name)
+    log = LOG_DIR / f'{run_name}.log'
+    st = artifact_state('yolov5', run_name)
     if experiment_done('yolov5', run_name):
         status({'model_family':'yolov5','dataset_variant':dataset_name,'run_name':run_name,'status':'skipped_existing','batch':batch})
         return True, batch
-    data = dataset_path / 'data_yolov5.yaml'
-    env = env_for(run_name)
-    train_cmd = [PYTHON, YOLOV5_REPO/'train.py', '--img', '640', '--batch', str(batch), '--epochs', '100',
-                 '--data', data, '--weights', FAMILIES['yolov5']['weights'], '--device', '0', '--workers', '8',
-                 '--project', RUN_ROOT/'yolov5', '--name', run_name, '--exist-ok', '--seed', '42', '--patience', '50']
-    log = LOG_DIR / f'{run_name}.log'
+    if has_train_artifacts('yolov5', run_name):
+        best = st['best']
+        val_cmd = [PYTHON, YOLOV5_REPO/'val.py', '--img', '640', '--batch', str(batch), '--data', data, '--weights', best,
+                   '--device', '0', '--task', 'test', '--project', RUN_ROOT/'yolov5_test', '--name', run_name, '--exist-ok']
+        code, _ = run_cmd(val_cmd, log, cwd=YOLOV5_REPO, env=env)
+        status({'model_family':'yolov5','dataset_variant':dataset_name,'run_name':run_name,'status':'test_completed_existing_train' if code==0 else 'failed_test_existing_train','batch':batch,'best_pt':str(best),'log':str(log)})
+        return True, batch
+    if has_resume_artifact('yolov5', run_name):
+        train_cmd = [PYTHON, YOLOV5_REPO/'train.py', '--resume', st['last']]
+    else:
+        train_cmd = [PYTHON, YOLOV5_REPO/'train.py', '--img', '640', '--batch', str(batch), '--epochs', '100',
+                     '--data', data, '--weights', FAMILIES['yolov5']['weights'], '--device', '0', '--workers', '8',
+                     '--project', RUN_ROOT/'yolov5', '--name', run_name, '--exist-ok', '--seed', '42', '--patience', '50']
     code, text = run_cmd(train_cmd, log, cwd=YOLOV5_REPO, env=env)
     if code != 0 and ('out of memory' in text.lower() or 'cuda oom' in text.lower()):
         return False, 8
@@ -107,18 +134,28 @@ def train_yolov5(dataset_name, dataset_path, batch):
     code, _ = run_cmd(val_cmd, log, cwd=YOLOV5_REPO, env=env)
     status({'model_family':'yolov5','dataset_variant':dataset_name,'run_name':run_name,'status':'completed' if code==0 else 'failed_test','batch':batch,'best_pt':str(best),'log':str(log)})
     return True, batch
-
 def train_ultra(fam, dataset_name, dataset_path, batch):
     run_name = f'{fam}_{dataset_name}'
-    if experiment_done(fam, run_name):
-        status({'model_family':fam,'dataset_variant':dataset_name,'run_name':run_name,'status':'skipped_existing','batch':batch})
-        return True, batch
     env = env_for(run_name)
     data = dataset_path / 'data.yaml'
     log = LOG_DIR / f'{run_name}.log'
-    train_cmd = ['yolo','detect','train', f'model={FAMILIES[fam]["weights"]}', f'data={data}', 'epochs=100', 'imgsz=640',
-                 f'batch={batch}', 'seed=42', 'device=0', 'workers=8', 'pretrained=True', 'mosaic=1.0', 'close_mosaic=10',
-                 'patience=50', 'plots=True', f'project={RUN_ROOT/fam}', f'name={run_name}', 'exist_ok=True']
+    st = artifact_state(fam, run_name)
+    if experiment_done(fam, run_name):
+        status({'model_family':fam,'dataset_variant':dataset_name,'run_name':run_name,'status':'skipped_existing','batch':batch})
+        return True, batch
+    if has_train_artifacts(fam, run_name):
+        best = st['best']
+        val_cmd = ['yolo','detect','val', f'model={best}', f'data={data}', 'split=test', 'imgsz=640', f'batch={batch}',
+                   'device=0', 'plots=True', f'project={RUN_ROOT/(fam+"_test")}', f'name={run_name}', 'exist_ok=True']
+        code, _ = run_cmd(val_cmd, log, env=env)
+        status({'model_family':fam,'dataset_variant':dataset_name,'run_name':run_name,'status':'test_completed_existing_train' if code==0 else 'failed_test_existing_train','batch':batch,'best_pt':str(best),'log':str(log)})
+        return True, batch
+    if has_resume_artifact(fam, run_name):
+        train_cmd = ['yolo','detect','train', f'model={st["last"]}', 'resume=True']
+    else:
+        train_cmd = ['yolo','detect','train', f'model={FAMILIES[fam]["weights"]}', f'data={data}', 'epochs=100', 'imgsz=640',
+                     f'batch={batch}', 'seed=42', 'device=0', 'workers=8', 'pretrained=True', 'mosaic=1.0', 'close_mosaic=10',
+                     'patience=50', 'plots=True', 'amp=False', f'project={RUN_ROOT/fam}', f'name={run_name}', 'exist_ok=True']
     code, text = run_cmd(train_cmd, log, env=env)
     if code != 0 and ('out of memory' in text.lower() or 'cuda oom' in text.lower()):
         return False, 8
@@ -131,7 +168,6 @@ def train_ultra(fam, dataset_name, dataset_path, batch):
     code, _ = run_cmd(val_cmd, log, env=env)
     status({'model_family':fam,'dataset_variant':dataset_name,'run_name':run_name,'status':'completed' if code==0 else 'failed_test','batch':batch,'best_pt':str(best),'log':str(log)})
     return True, batch
-
 def main():
     validate_inputs()
     print('wandb_login_detected=', has_wandb_login())

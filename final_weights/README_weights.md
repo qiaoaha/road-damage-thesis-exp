@@ -26,3 +26,8 @@ Weights are kept on the server unless explicitly selected as final thesis weight
 
 Weights are kept on the server unless explicitly selected as final thesis weights. Run root: `/root/autodl-tmp/road_damage_exp/runs_ch4_base80_wandb`.
 
+
+## Chapter 4 W&B run snapshot - 2026-06-20 14:27:29
+
+Weights are kept on the server unless explicitly selected as final thesis weights. Run root: `/root/autodl-tmp/road_damage_exp/runs_ch4_base80_wandb`.
+
