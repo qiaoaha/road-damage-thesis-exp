@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 from typing import Iterable
 
 import numpy as np
@@ -76,16 +77,51 @@ def batched(items: list, batch_size: int) -> Iterable[list]:
 
 
 def load_dinov2_encoder(model_dir: str | Path, device: str):
+    import torch
+
+    model_path = Path(model_dir)
+    if model_path.suffix.lower() in {".pth", ".pt"}:
+        return load_dinov2_torchhub(model_path, device, torch)
     try:
-        import torch
         from transformers import AutoImageProcessor, AutoModel
+
+        processor = AutoImageProcessor.from_pretrained(str(model_path), local_files_only=True)
+        model = AutoModel.from_pretrained(str(model_path), local_files_only=True).to(device)
+        model.eval()
+        return {"kind": "hf", "processor": processor}, model, torch
+    except Exception:
+        pths = sorted(model_path.glob("*.pth")) if model_path.is_dir() else []
+        if pths:
+            return load_dinov2_torchhub(pths[0], device, torch)
+        raise RuntimeError(f"Could not load DINOv2 as a HuggingFace model or torchhub checkpoint: {model_path}")
+
+
+def load_dinov2_torchhub(weight_path: Path, device: str, torch):
+    try:
+        from torchvision import transforms
     except ImportError as exc:
-        raise RuntimeError("DINOv2 extraction requires torch and transformers") from exc
-    model_dir = str(model_dir)
-    processor = AutoImageProcessor.from_pretrained(model_dir, local_files_only=True)
-    model = AutoModel.from_pretrained(model_dir, local_files_only=True).to(device)
-    model.eval()
-    return processor, model, torch
+        raise RuntimeError("DINOv2 torchhub checkpoints require torchvision") from exc
+    repo = Path("/root/autodl-tmp/cache/torch/hub/facebookresearch_dinov2_main")
+    if not repo.exists():
+        repo = Path("/root/autodl-tmp/road_damage_exp/third_party/dinov2")
+    if not repo.exists():
+        raise RuntimeError("DINOv2 torchhub repository was not found on this machine")
+    name = "dinov2_vitb14" if "vitb" in weight_path.name.lower() else "dinov2_vits14"
+    model = torch.hub.load(str(repo), name, source="local", pretrained=False)
+    state = torch.load(str(weight_path), map_location="cpu")
+    if isinstance(state, dict) and "model" in state:
+        state = state["model"]
+    model.load_state_dict(state, strict=False)
+    model.eval().to(device)
+    transform = transforms.Compose(
+        [
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+        ]
+    )
+    return {"kind": "torchhub", "transform": transform}, model, torch
 
 
 def encode_dinov2_images(rows: list[dict], model_dir: Path, device: str, batch_size: int) -> np.ndarray:
@@ -94,37 +130,65 @@ def encode_dinov2_images(rows: list[dict], model_dir: Path, device: str, batch_s
     with torch.no_grad():
         for batch in batched(rows, batch_size):
             images = [pil_load(row["image_path"]) for row in batch]
-            inputs = processor(images=images, return_tensors="pt")
-            inputs = {key: value.to(device) for key, value in inputs.items()}
-            outputs = model(**inputs)
-            if hasattr(outputs, "pooler_output") and outputs.pooler_output is not None:
-                feat = outputs.pooler_output
+            if processor["kind"] == "hf":
+                inputs = processor["processor"](images=images, return_tensors="pt")
+                inputs = {key: value.to(device) for key, value in inputs.items()}
+                outputs = model(**inputs)
+                if hasattr(outputs, "pooler_output") and outputs.pooler_output is not None:
+                    feat = outputs.pooler_output
+                else:
+                    feat = outputs.last_hidden_state[:, 0]
             else:
-                feat = outputs.last_hidden_state[:, 0]
+                tensor = torch.stack([processor["transform"](image) for image in images]).to(device)
+                feat = model(tensor)
             feats.append(feat.detach().cpu().numpy())
     return normalize_features(np.concatenate(feats, axis=0)) if feats else np.zeros((0, 0), dtype="float32")
 
 
 def load_clip_encoder(model_dir: str | Path, device: str):
+    import torch
+
+    model_path = Path(model_dir)
+    if model_path.suffix.lower() in {".pt", ".pth"}:
+        return load_openai_clip(model_path, device, torch)
     try:
-        import torch
         from transformers import CLIPModel, CLIPProcessor
+
+        processor = CLIPProcessor.from_pretrained(str(model_path), local_files_only=True)
+        model = CLIPModel.from_pretrained(str(model_path), local_files_only=True).to(device)
+        model.eval()
+        return {"kind": "hf", "processor": processor}, model, torch
+    except Exception:
+        pts = sorted(model_path.glob("*.pt")) if model_path.is_dir() else []
+        if pts:
+            return load_openai_clip(pts[0], device, torch)
+        raise RuntimeError(f"Could not load CLIP as a HuggingFace model or OpenAI CLIP checkpoint: {model_path}")
+
+
+def load_openai_clip(weight_path: Path, device: str, torch):
+    for package_dir in ["/root/autodl-tmp/road_damage_exp/third_party/SDS", "/root/autodl-tmp/road_damage_exp/third_party/CLIP"]:
+        if Path(package_dir).exists() and package_dir not in sys.path:
+            sys.path.insert(0, package_dir)
+    try:
+        import clip
     except ImportError as exc:
-        raise RuntimeError("PCS extraction requires torch and transformers with CLIP support") from exc
-    model_dir = str(model_dir)
-    processor = CLIPProcessor.from_pretrained(model_dir, local_files_only=True)
-    model = CLIPModel.from_pretrained(model_dir, local_files_only=True).to(device)
+        raise RuntimeError("OpenAI CLIP checkpoint requires the local clip package") from exc
+    model, preprocess = clip.load(str(weight_path), device=device)
     model.eval()
-    return processor, model, torch
+    return {"kind": "openai", "preprocess": preprocess, "clip": clip}, model, torch
 
 
 def encode_clip_images(images: list[Image.Image], processor, model, torch, device: str, batch_size: int) -> np.ndarray:
     feats: list[np.ndarray] = []
     with torch.no_grad():
         for batch in batched(images, batch_size):
-            inputs = processor(images=batch, return_tensors="pt")
-            inputs = {key: value.to(device) for key, value in inputs.items()}
-            feat = model.get_image_features(**inputs)
+            if processor["kind"] == "hf":
+                inputs = processor["processor"](images=batch, return_tensors="pt")
+                inputs = {key: value.to(device) for key, value in inputs.items()}
+                feat = model.get_image_features(**inputs)
+            else:
+                inputs = torch.stack([processor["preprocess"](image) for image in batch]).to(device)
+                feat = model.encode_image(inputs)
             feats.append(feat.detach().cpu().numpy())
     return normalize_features(np.concatenate(feats, axis=0)) if feats else np.zeros((0, 0), dtype="float32")
 
@@ -133,9 +197,13 @@ def encode_clip_texts(texts: list[str], processor, model, torch, device: str, ba
     feats: list[np.ndarray] = []
     with torch.no_grad():
         for batch in batched(texts, batch_size):
-            inputs = processor(text=batch, padding=True, truncation=True, return_tensors="pt")
-            inputs = {key: value.to(device) for key, value in inputs.items()}
-            feat = model.get_text_features(**inputs)
+            if processor["kind"] == "hf":
+                inputs = processor["processor"](text=batch, padding=True, truncation=True, return_tensors="pt")
+                inputs = {key: value.to(device) for key, value in inputs.items()}
+                feat = model.get_text_features(**inputs)
+            else:
+                inputs = processor["clip"].tokenize(batch, truncate=True).to(device)
+                feat = model.encode_text(inputs)
             feats.append(feat.detach().cpu().numpy())
     return normalize_features(np.concatenate(feats, axis=0)) if feats else np.zeros((0, 0), dtype="float32")
 
