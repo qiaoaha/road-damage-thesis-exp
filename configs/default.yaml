@@ -1,0 +1,102 @@
+dataset:
+  name: road_damage_example
+  task: detection
+  format: yolo
+  real_images_dir: /path/to/real/images
+  real_labels_dir: /path/to/real/labels
+  generated_images_dir: /path/to/generated/images
+  generated_labels_dir: /path/to/generated/labels
+  output_dir: /path/to/output/gen_screening_result
+
+classes:
+  names:
+    0: D00
+    1: D10
+    2: D20
+    3: D40
+  prompts:
+    0: longitudinal crack on asphalt road
+    1: transverse crack on asphalt road
+    2: alligator crack on asphalt road
+    3: pothole on asphalt road
+
+selection:
+  total_num: 200
+  class_quota:
+    0: 50
+    1: 50
+    2: 50
+    3: 50
+  quota_mode: fixed
+  allow_quota_redistribution: true
+
+models:
+  dinov2:
+    enabled: true
+    model_dir: /path/to/dinov2
+    device: auto
+    batch_size: 32
+  clip:
+    enabled: true
+    model_dir: /path/to/clip
+    device: auto
+    batch_size: 32
+  teacher:
+    enabled: true
+    type: dfine
+    weights: /path/to/teacher/weights.pth
+    device: auto
+    conf_threshold: 0.25
+    existing_predictions:
+
+scores:
+  dino:
+    enabled: true
+    topk: 5
+  pcs:
+    enabled: true
+    num_augmentations: 4
+    image_text_weight: 0.6
+    stable_weight: 0.4
+  teacher_conf:
+    enabled: true
+    max_conf_weight: 0.7
+    mean_conf_weight: 0.3
+    wrong_class_penalty: 0.5
+  margin:
+    enabled: true
+
+quality:
+  weights:
+    dino: 0.30
+    pcs: 0.30
+    teacher_conf: 0.25
+    margin: 0.15
+  normalize: class_minmax
+  eps: 1.0e-8
+
+filter:
+  enabled: false
+  thresholds:
+    dino: 0.2
+    pcs: 0.2
+    teacher_conf: 0.3
+  threshold_mode: absolute
+
+mmr:
+  enabled: true
+  lambda_quality: 0.7
+  lambda_diversity: 0.3
+  similarity_feature: dinov2
+
+cache:
+  use_cache: true
+  cache_dir: /path/to/output/cache
+  force: false
+
+runtime:
+  dry_run: false
+  dry_run_per_class: 5
+  cpu_only_check: false
+  seed: 2026
+  log_dir: /path/to/output/logs

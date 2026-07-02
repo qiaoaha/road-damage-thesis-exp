@@ -1,0 +1,18 @@
+dataset:
+  name: my_dataset
+  real_images_dir: /abs/path/real/images
+  real_labels_dir: /abs/path/real/labels
+  generated_images_dir: /abs/path/generated/images
+  generated_labels_dir: /abs/path/generated/labels
+  output_dir: /abs/path/output/gen_screening_result
+
+classes:
+  names:
+    0: class0
+  prompts:
+    0: object on road
+
+selection:
+  total_num: 10
+  class_quota:
+    0: 10

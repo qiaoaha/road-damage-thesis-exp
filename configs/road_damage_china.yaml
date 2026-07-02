@@ -1,0 +1,9 @@
+dataset:
+  name: road_damage_china
+  real_images_dir: /root/autodl-tmp/road_damage_exp/datasets/china_yolo/train/images
+  real_labels_dir: /root/autodl-tmp/road_damage_exp/datasets/china_yolo/train/labels
+  generated_images_dir: /root/autodl-tmp/road_damage_exp/generated/china_candidates/images
+  generated_labels_dir: /root/autodl-tmp/road_damage_exp/generated/china_candidates/labels
+  output_dir: /root/autodl-tmp/road_damage_exp/reports/gen_screening/china
+runtime:
+  log_dir: /root/autodl-tmp/road_damage_exp/reports/gen_screening/china/logs

@@ -1,0 +1,9 @@
+dataset:
+  name: road_damage_japan
+  real_images_dir: /root/autodl-tmp/road_damage_exp/datasets/japan_yolo/train/images
+  real_labels_dir: /root/autodl-tmp/road_damage_exp/datasets/japan_yolo/train/labels
+  generated_images_dir: /root/autodl-tmp/road_damage_exp/generated/japan_candidates/images
+  generated_labels_dir: /root/autodl-tmp/road_damage_exp/generated/japan_candidates/labels
+  output_dir: /root/autodl-tmp/road_damage_exp/reports/gen_screening/japan
+runtime:
+  log_dir: /root/autodl-tmp/road_damage_exp/reports/gen_screening/japan/logs
