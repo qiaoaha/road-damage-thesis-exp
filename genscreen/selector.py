@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .config import cfg_path
 from .io_utils import read_csv, safe_copy, write_csv
-from .mmr import mmr_select
+from .mmr import load_similarity_features, mmr_select
 
 
 def quota_map(cfg: dict, classes: list[str]) -> dict[str, int]:
@@ -22,7 +22,7 @@ def quota_map(cfg: dict, classes: list[str]) -> dict[str, int]:
     return quotas
 
 
-def select_samples(cfg: dict, quality_csv: Path, output_dir: Path, copy_files: bool = True) -> list[dict]:
+def select_samples(cfg: dict, quality_csv: Path, output_dir: Path, copy_files: bool = True, dry_run: bool = False) -> list[dict]:
     rows = [r for r in read_csv(quality_csv) if r.get("is_valid") == "true"]
     groups: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
@@ -34,6 +34,8 @@ def select_samples(cfg: dict, quality_csv: Path, output_dir: Path, copy_files: b
     lamb_q = float(cfg_path(cfg, "mmr.lambda_quality", 0.7))
     lamb_d = float(cfg_path(cfg, "mmr.lambda_diversity", 0.3))
     mmr_enabled = bool(cfg_path(cfg, "mmr.enabled", True))
+    features = load_similarity_features(output_dir) if mmr_enabled else {}
+    allow_dummy_similarity = dry_run or bool(cfg_path(cfg, "mmr.allow_dummy_similarity", False))
     for cls, quota in quotas.items():
         available = groups.get(cls, [])
         take = min(quota, len(available))
@@ -41,11 +43,11 @@ def select_samples(cfg: dict, quality_csv: Path, output_dir: Path, copy_files: b
             shortfall += quota - take
             if not allow_redistribution:
                 raise RuntimeError(f"class {cls} has {len(available)} candidates but quota is {quota}")
-        selected.extend(mmr_select(available, take, lamb_q, lamb_d, mmr_enabled))
+        selected.extend(mmr_select(available, take, lamb_q, lamb_d, mmr_enabled, features, allow_dummy_similarity))
     if shortfall and allow_redistribution:
         already = {r["image_path"] for r in selected}
         leftovers = [r for r in rows if r["image_path"] not in already]
-        selected.extend(mmr_select(leftovers, shortfall, lamb_q, lamb_d, mmr_enabled))
+        selected.extend(mmr_select(leftovers, shortfall, lamb_q, lamb_d, mmr_enabled, features, allow_dummy_similarity))
     selected = sorted(selected, key=lambda r: float(r.get("Q", 0) or 0), reverse=True)
     for rank, row in enumerate(selected, 1):
         row["rank_global"] = rank
@@ -59,6 +61,7 @@ def select_samples(cfg: dict, quality_csv: Path, output_dir: Path, copy_files: b
         "Q",
         "mmr_score",
         "diversity_penalty",
+        "max_similarity_to_selected",
         "S_DINO",
         "S_PCS",
         "S_conf",
