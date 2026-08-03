@@ -1,0 +1,13 @@
+mode: adapter_only
+trainable:
+  - NormalConditionEncoder
+  - RGConditionEncoder
+  - NormalAdapter
+  - DefectAdapter
+  - TimestepGate
+frozen:
+  - VAE
+  - text_encoders
+  - SD3_base_transformer
+losses:
+  - Lflow

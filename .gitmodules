@@ -1,0 +1,3 @@
+[submodule "tools/sd3_rg_dual_adapter/third_party/DIAG"]
+	path = tools/sd3_rg_dual_adapter/third_party/DIAG
+	url = https://github.com/intelligolabs/DIAG.git

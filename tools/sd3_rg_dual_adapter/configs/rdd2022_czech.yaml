@@ -1,0 +1,13 @@
+dataset: Czech_YOLO_seed2026
+splits:
+  train: 1980
+  val: 424
+  test: 425
+train_distribution:
+  positive_images: 750
+  negative_images: 1230
+classes:
+  0: D00
+  1: D10
+  2: D20
+  3: D40

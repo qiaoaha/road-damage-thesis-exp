@@ -1,0 +1,9 @@
+name: SD3-RGDA
+formula: "H = H0 + gn(t) * Anormal(N) + gd(t) * Mtoken * Adefect(R)"
+defaults:
+  bottleneck_ratio: 0.125
+  use_normal_adapter: true
+  use_defect_adapter: true
+  share_adapter_weights: false
+  use_timestep_gate: true
+  use_region_token_mask: true

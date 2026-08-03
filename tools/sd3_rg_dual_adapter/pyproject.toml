@@ -1,0 +1,24 @@
+[project]
+name = "sd3-rg-dual-adapter"
+version = "0.1.0"
+description = "Clean-room SD3 Region-Guided Dual Adapter scaffold for RDD2022 road-damage generation."
+requires-python = ">=3.11"
+dependencies = ["torch", "numpy", "pyyaml", "pillow"]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff", "mypy"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["third_party/"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+exclude = ["third_party/"]
+
+[[tool.mypy.overrides]]
+module = ["torch.*", "PIL.*", "cv2.*", "yaml.*"]
+ignore_missing_imports = true

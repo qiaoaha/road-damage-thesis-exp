@@ -22,11 +22,22 @@ temp/
 
 # large model files by default
 *.pth
+*.pt
 *.onnx
+*.bin
 *.engine
 *.safetensors
 *.ckpt
+*.tar
+*.tar.gz
+*.zip
 weights/
+models/
+outputs/
+checkpoints/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # allow selected final YOLO weights
 !final_weights/

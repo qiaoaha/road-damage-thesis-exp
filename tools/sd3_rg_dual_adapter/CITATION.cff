@@ -1,0 +1,8 @@
+cff-version: 1.2.0
+title: "SD3-RG Dual Adapter"
+message: "If you use this scaffold, cite the upstream DIAG, RoadFusion, Stable Diffusion 3, and RDD2022 sources as applicable."
+type: software
+authors:
+  - family-names: "Qiao"
+    given-names: "Aha"
+version: 0.1.0
