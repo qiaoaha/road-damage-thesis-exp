@@ -7,7 +7,7 @@ from torch import nn
 
 
 class TimestepGate(nn.Module):
-    """Produces independent tanh gates gn(t) and gd(t), zero at initialization."""
+    """Produces independent gates gn(t) and gd(t), both initialized to one."""
 
     def __init__(self, embed_dim: int, hidden_dim: int | None = None, enabled: bool = True) -> None:
         super().__init__()
@@ -27,8 +27,8 @@ class TimestepGate(nn.Module):
         if not self.enabled:
             one = torch.ones((*timestep_embedding.shape[:-1], 1), device=timestep_embedding.device)
             return one, one
-        gn = torch.tanh(self.normal(timestep_embedding))
-        gd = torch.tanh(self.defect(timestep_embedding))
+        gn = 1.0 + torch.tanh(self.normal(timestep_embedding))
+        gd = 1.0 + torch.tanh(self.defect(timestep_embedding))
         self.history.extend(
             (float(n.detach().cpu()), float(d.detach().cpu()))
             for n, d in zip(gn.flatten(), gd.flatten(), strict=False)
