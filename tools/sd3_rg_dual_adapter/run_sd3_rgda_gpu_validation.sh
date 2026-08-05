@@ -16,13 +16,15 @@ export TOKENIZERS_PARALLELISM=false
 
 mkdir -p "${REPORT_DIR}" "${MANIFEST_DIR}"
 
-"${PYTHON}" scripts/probe_real_sd3.py --model-path "${MODEL_PATH}" --report "${REPORT_DIR}/00_REAL_SD3_STRUCTURE.md" --no-load-weights
+"${PYTHON}" scripts/probe_real_sd3.py --model-path "${MODEL_PATH}" --report "${REPORT_DIR}/00_REAL_SD3_STRUCTURE.md"
 "${PYTHON}" scripts/build_czech_manifest.py --dataset-root "${DATASET_ROOT}" --out-dir "${MANIFEST_DIR}"
-"${PYTHON}" scripts/gpu_forward_backward_smoke.py --report "${REPORT_DIR}/02_GRADIENT_SMOKE.md"
+"${PYTHON}" scripts/cache_real_sd3_inputs.py --manifest "${MANIFEST_DIR}/gpu_smoke8.csv" --out "${MANIFEST_DIR}/cached_gpu_smoke8.csv" --dry-run
 
 if [[ "${SD3_RGDA_DRY_RUN:-0}" == "1" ]]; then
-  "${PYTHON}" scripts/run_smoke100.py --manifest "${MANIFEST_DIR}/gpu_smoke8.csv" --report "${REPORT_DIR}/03_SMOKE100.md" --dry-run
-  "${PYTHON}" scripts/run_micro_overfit500.py --manifest "${MANIFEST_DIR}/micro_overfit4.csv" --report "${REPORT_DIR}/04_MICRO_OVERFIT500.md" --dry-run
+  "${PYTHON}" scripts/gpu_forward_backward_smoke.py --report "${REPORT_DIR}/02_GRADIENT_SMOKE.md"
+  "${PYTHON}" scripts/run_smoke100.py --manifest "${MANIFEST_DIR}/cached_gpu_smoke8.csv" --model-path "${MODEL_PATH}" --report "${REPORT_DIR}/03_SMOKE100.md" --dry-run
+  "${PYTHON}" scripts/cache_real_sd3_inputs.py --manifest "${MANIFEST_DIR}/micro_overfit4.csv" --out "${MANIFEST_DIR}/cached_micro_overfit4.csv" --dry-run
+  "${PYTHON}" scripts/run_micro_overfit500.py --manifest "${MANIFEST_DIR}/cached_micro_overfit4.csv" --model-path "${MODEL_PATH}" --report "${REPORT_DIR}/04_MICRO_OVERFIT500.md" --dry-run
   "${PYTHON}" scripts/verify_checkpoint_reload.py --checkpoint "${REPORT_DIR}/checkpoint_step_500.safetensors" --report "${REPORT_DIR}/05_CHECKPOINT_RELOAD.md" --dry-run
 else
   if ! nvidia-smi -L | grep -q "NVIDIA GeForce RTX 5090"; then
@@ -30,8 +32,10 @@ else
     echo "Expected NVIDIA GeForce RTX 5090" >> "${REPORT_DIR}/07_FINAL_STATUS.md"
     exit 2
   fi
-  "${PYTHON}" scripts/run_smoke100.py --manifest "${MANIFEST_DIR}/gpu_smoke8.csv" --report "${REPORT_DIR}/03_SMOKE100.md"
-  "${PYTHON}" scripts/run_micro_overfit500.py --manifest "${MANIFEST_DIR}/micro_overfit4.csv" --report "${REPORT_DIR}/04_MICRO_OVERFIT500.md"
+  "${PYTHON}" scripts/gpu_forward_backward_smoke.py --report "${REPORT_DIR}/02_GRADIENT_SMOKE.md"
+  "${PYTHON}" scripts/run_smoke100.py --manifest "${MANIFEST_DIR}/cached_gpu_smoke8.csv" --model-path "${MODEL_PATH}" --report "${REPORT_DIR}/03_SMOKE100.md"
+  "${PYTHON}" scripts/cache_real_sd3_inputs.py --manifest "${MANIFEST_DIR}/micro_overfit4.csv" --out "${MANIFEST_DIR}/cached_micro_overfit4.csv" --dry-run
+  "${PYTHON}" scripts/run_micro_overfit500.py --manifest "${MANIFEST_DIR}/cached_micro_overfit4.csv" --model-path "${MODEL_PATH}" --report "${REPORT_DIR}/04_MICRO_OVERFIT500.md"
   "${PYTHON}" scripts/verify_checkpoint_reload.py --checkpoint "${REPORT_DIR}/checkpoint_step_500.safetensors" --report "${REPORT_DIR}/05_CHECKPOINT_RELOAD.md"
 fi
 

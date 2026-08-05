@@ -22,3 +22,6 @@ exclude = ["third_party/"]
 [[tool.mypy.overrides]]
 module = ["torch.*", "PIL.*", "cv2.*", "yaml.*"]
 ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

@@ -10,7 +10,6 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", type=Path, required=True)
     parser.add_argument("--report", type=Path, required=True)
-    parser.add_argument("--no-load-weights", action="store_true")
     args = parser.parse_args()
     transformer_config = args.model_path / "transformer" / "config.json"
     model_index = args.model_path / "model_index.json"
@@ -43,6 +42,7 @@ def main() -> int:
                 "SD3_CONFIG_AUDIT=PASS",
                 "SD3_FORWARD_SIGNATURE_AUDIT=PASS",
                 "FLOW_MATCH_SCHEDULER_IMPORT=PASS",
+                "SD3_FULL_LOAD=NOT_RUN_NO_GPU_PROBE_ONLY",
                 f"TRANSFORMER_FORWARD_SIGNATURE={signature}",
                 f"SCHEDULER_CLASS={FlowMatchEulerDiscreteScheduler.__name__}",
                 f"TRANSFORMER_CONFIG_FIELDS={','.join(sorted(config))}",
