@@ -35,8 +35,9 @@ class _MockSD3Transformer(nn.Module):
         encoder_hidden_states: torch.Tensor,
         pooled_projections: torch.Tensor,
         timestep: torch.Tensor,
+        return_dict: bool = True,
     ) -> _Output:
-        del encoder_hidden_states, pooled_projections, timestep
+        del encoder_hidden_states, pooled_projections, timestep, return_dict
         tokens = self.pos_embed(hidden_states)
         return _Output(self.proj(tokens))
 
@@ -57,6 +58,7 @@ def test_wrapper_matches_mock_base_at_init() -> None:
         pseudo_clean_latents=torch.randn(2, 4, 2, 2),
         rg_maps=torch.randn(2, 7, 2, 2),
         token_mask=torch.ones(2, 4, 1),
+        timesteps=torch.ones(2),
     )
     kwargs = {
         "hidden_states": x,
@@ -65,5 +67,5 @@ def test_wrapper_matches_mock_base_at_init() -> None:
         "timestep": torch.ones(2),
     }
     without_hook = base(**kwargs).sample
-    with_hook = wrapper(**kwargs, rgda_condition=condition, timestep_embedding=torch.randn(2, 16)).sample
+    with_hook = wrapper(**kwargs, rgda_condition=condition).sample
     torch.testing.assert_close(with_hook, without_hook, atol=1e-6, rtol=0)

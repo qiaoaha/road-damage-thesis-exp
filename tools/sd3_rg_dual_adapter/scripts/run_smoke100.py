@@ -8,28 +8,29 @@ from run_real_sd3_validation import main as real_main
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--report", type=Path, required=True)
-    parser.add_argument("--steps", type=int, default=100)
-    parser.add_argument("--model-path", type=Path, default=Path("."))
-    parser.add_argument("--dry-run", action="store_true")
+    parser = argparse.ArgumentParser(description="Thin smoke wrapper for unified real SD3-RGDA validation.")
+    parser.add_argument("--model-path", type=Path, required=True)
+    parser.add_argument("--dataset-root", type=Path, required=True)
+    parser.add_argument("--smoke-manifest", type=Path, required=True)
+    parser.add_argument("--micro-manifest", type=Path, required=True)
+    parser.add_argument("--negative-manifest", type=Path, required=True)
+    parser.add_argument("--report-dir", type=Path, required=True)
     args = parser.parse_args()
     sys.argv = [
         sys.argv[0],
         "--model-path",
         str(args.model_path),
-        "--cache-manifest",
-        str(args.manifest),
-        "--report",
-        str(args.report),
-        "--steps",
-        str(args.steps),
-        "--stage",
-        "smoke100",
+        "--dataset-root",
+        str(args.dataset_root),
+        "--smoke-manifest",
+        str(args.smoke_manifest),
+        "--micro-manifest",
+        str(args.micro_manifest),
+        "--negative-manifest",
+        str(args.negative_manifest),
+        "--report-dir",
+        str(args.report_dir),
     ]
-    if args.dry_run:
-        sys.argv.append("--dry-run")
     return real_main()
 
 

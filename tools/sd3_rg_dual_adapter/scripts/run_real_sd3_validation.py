@@ -3,63 +3,46 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import torch
 
-def write_report(path: Path, lines: list[str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+from sd3_rgda.real_sd3_engine import run_full_real_validation
+
+
+def parse_dtype(name: str) -> torch.dtype:
+    if name == "bfloat16":
+        return torch.bfloat16
+    if name == "float16":
+        return torch.float16
+    if name == "float32":
+        return torch.float32
+    raise ValueError(f"Unsupported dtype: {name}")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Real SD3-RGDA GPU validation entrypoint.")
+    parser = argparse.ArgumentParser(description="Executable real SD3-RGDA GPU validation.")
     parser.add_argument("--model-path", type=Path, required=True)
-    parser.add_argument("--cache-manifest", type=Path, required=True)
-    parser.add_argument("--report", type=Path, required=True)
-    parser.add_argument("--steps", type=int, required=True)
-    parser.add_argument("--stage", choices=["smoke100", "micro500", "checkpoint"], required=True)
-    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--dataset-root", type=Path, required=True)
+    parser.add_argument("--smoke-manifest", type=Path, required=True)
+    parser.add_argument("--micro-manifest", type=Path, required=True)
+    parser.add_argument("--negative-manifest", type=Path, required=True)
+    parser.add_argument("--report-dir", type=Path, required=True)
+    parser.add_argument("--resolution", type=int, default=512)
+    parser.add_argument("--dtype", choices=["bfloat16", "float16", "float32"], default="bfloat16")
+    parser.add_argument("--seed", type=int, default=2026)
     args = parser.parse_args()
-    if args.steps <= 0:
-        raise ValueError("--steps must be positive")
-    if args.dry_run:
-        write_report(
-            args.report,
-            [
-                f"REAL_SD3_VALIDATION_STAGE={args.stage}",
-                "REAL_SD3_FORWARD=NOT_RUN_NO_GPU",
-                "REAL_CZECH_CACHE=ENTRY_CHECK_ONLY",
-                f"STEPS_REQUESTED={args.steps}",
-                "GPU_USED=NO",
-            ],
-        )
-        print(f"REAL_SD3_VALIDATION_STAGE={args.stage}")
-        return 0
-
-    import torch
-
-    from sd3_rgda.cache import validate_cache_manifest_header
-    from sd3_rgda.real_sd3_engine import load_real_sd3_transformer
-
     if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is required for real SD3-RGDA validation")
-    if not args.cache_manifest.exists():
-        raise FileNotFoundError(args.cache_manifest)
-    header = args.cache_manifest.read_text(encoding="utf-8").splitlines()[0].split(",")
-    validate_cache_manifest_header(set(header))
-    transformer, stats = load_real_sd3_transformer(args.model_path)
-    del transformer
-    write_report(
-        args.report,
-        [
-            f"REAL_SD3_VALIDATION_STAGE={args.stage}",
-            "SD3_FULL_LOAD=PASS",
-            f"TRANSFORMER_CLASS={stats.transformer_class}",
-            f"PARAMETER_COUNT={stats.parameter_count}",
-            f"DTYPE={stats.dtype}",
-            f"DEVICE={stats.device}",
-            f"PATCH_MODULE_NAME={stats.patch_module_name}",
-            "REAL_SD3_FORWARD=PENDING_REAL_FORWARD_LOOP",
-            "FINAL_VERDICT=SD3_RGDA_GPU_VALIDATION_FAIL",
-        ],
+        raise RuntimeError("CUDA is required for executable real SD3-RGDA validation")
+    if not args.dataset_root.exists():
+        raise FileNotFoundError(args.dataset_root)
+    run_full_real_validation(
+        model_path=args.model_path,
+        smoke_manifest=args.smoke_manifest,
+        micro_manifest=args.micro_manifest,
+        negative_manifest=args.negative_manifest,
+        report_dir=args.report_dir,
+        resolution=args.resolution,
+        dtype=parse_dtype(args.dtype),
+        seed=args.seed,
     )
     return 0
 

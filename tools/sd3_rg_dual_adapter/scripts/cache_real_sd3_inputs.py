@@ -1,26 +1,27 @@
 from __future__ import annotations
 
 import argparse
-import csv
 from pathlib import Path
 
-from sd3_rgda.cache import REQUIRED_CACHE_COLUMNS
+import torch
+
+from sd3_rgda.cache import cache_manifest_rows
+from sd3_rgda.real_sd3_engine import load_sd3_pipeline
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Prepare real SD3 input cache manifest contract.")
+    parser = argparse.ArgumentParser(description="Build real SD3 Czech cache files.")
+    parser.add_argument("--model-path", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--out-dir", type=Path, required=True)
+    parser.add_argument("--resolution", type=int, default=512)
+    parser.add_argument("--patch-size", type=int, default=2)
     args = parser.parse_args()
-    if not args.manifest.exists():
-        raise FileNotFoundError(args.manifest)
-    rows = list(csv.DictReader(args.manifest.open("r", encoding="utf-8")))
-    if not rows:
-        raise RuntimeError(f"Empty manifest: {args.manifest}")
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(",".join(REQUIRED_CACHE_COLUMNS) + "\n", encoding="utf-8")
-    print("REAL_CZECH_CACHE_ENTRY_READY=PASS")
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required to run VAE and prompt encoders for cache creation")
+    pipe = load_sd3_pipeline(args.model_path, torch.bfloat16)
+    cache_manifest_rows(pipe, args.manifest, args.out_dir, args.resolution, torch.bfloat16, args.patch_size)
+    print("REAL_CZECH_CACHE_IMPLEMENTED=PASS")
     return 0
 
 

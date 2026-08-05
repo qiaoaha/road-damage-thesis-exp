@@ -24,7 +24,7 @@ def test_no_dual_zero_gradient_deadlock() -> None:
     h0 = torch.randn(2, 3, 8)
     normal = torch.randn(2, 3, 8)
     defect = torch.randn(2, 3, 8)
-    timestep = torch.randn(2, 4)
+    timestep = torch.ones(2)
     gn, gd = gate(timestep)
     assert torch.allclose(gn, torch.ones_like(gn))
     assert torch.allclose(gd, torch.ones_like(gd))
@@ -48,7 +48,7 @@ def test_negative_mask_keeps_defect_branch_zero_grad() -> None:
     block = DualAdapterBlock(DualAdapterConfig(token_dim=8))
     gate = TimestepGate(embed_dim=4)
     h0 = torch.randn(2, 3, 8)
-    out = block(h0, h0, h0, *gate(torch.randn(2, 4)), torch.zeros(2, 3, 1))
+    out = block(h0, h0, h0, *gate(torch.ones(2)), torch.zeros(2, 3, 1))
     out.square().mean().backward()
     _, defect_grad = _last_linear_grad_sum(block)
     assert defect_grad == 0.0

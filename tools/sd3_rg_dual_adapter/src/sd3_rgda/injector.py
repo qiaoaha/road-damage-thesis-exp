@@ -18,6 +18,7 @@ class RGDAConditionBatch:
     pseudo_clean_latents: torch.Tensor
     rg_maps: torch.Tensor
     token_mask: torch.Tensor
+    timesteps: torch.Tensor
 
 
 class RGDAInjector(nn.Module):
@@ -35,14 +36,14 @@ class RGDAInjector(nn.Module):
         self.timestep_gate = TimestepGate(embed_dim=timestep_embed_dim)
         self.last_residual: torch.Tensor | None = None
 
-    def forward(self, h0: torch.Tensor, condition: RGDAConditionBatch, timestep_embedding: torch.Tensor) -> torch.Tensor:
+    def forward(self, h0: torch.Tensor, condition: RGDAConditionBatch) -> torch.Tensor:
         normal_tokens = self.normal_encoder(condition.pseudo_clean_latents)
         defect_tokens = self.rg_encoder(condition.rg_maps)
         token_mask = condition.token_mask
         if token_mask.ndim == 2:
             token_mask = token_mask.unsqueeze(-1)
         self._assert_token_shapes(h0, normal_tokens, defect_tokens, token_mask)
-        gate_normal, gate_defect = self.timestep_gate(timestep_embedding)
+        gate_normal, gate_defect = self.timestep_gate(condition.timesteps)
         injected = self.adapter(h0, normal_tokens, defect_tokens, gate_normal, gate_defect, token_mask)
         self.last_residual = injected - h0
         return cast(torch.Tensor, injected)
@@ -73,14 +74,13 @@ class RGDAInjector(nn.Module):
 
 
 class RGDAPatchHook:
-    def __init__(self, injector: RGDAInjector, condition: RGDAConditionBatch, timestep_embedding: torch.Tensor) -> None:
+    def __init__(self, injector: RGDAInjector, condition: RGDAConditionBatch) -> None:
         self.injector = injector
         self.condition = condition
-        self.timestep_embedding = timestep_embedding
         self.calls = 0
 
     def __call__(self, _module: nn.Module, _inputs: tuple[object, ...], output: torch.Tensor) -> torch.Tensor:
         self.calls += 1
         if self.calls > 1:
             raise RuntimeError("RGDA patch hook was called more than once")
-        return cast(torch.Tensor, self.injector(output, self.condition, self.timestep_embedding))
+        return cast(torch.Tensor, self.injector(output, self.condition))

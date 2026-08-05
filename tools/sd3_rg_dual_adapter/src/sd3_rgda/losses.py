@@ -1,6 +1,8 @@
-"""Flow Matching losses for adapter-only SD3 training."""
+"""Flow Matching losses for real SD3-RGDA training."""
 
 from __future__ import annotations
+
+from typing import Any
 
 import torch
 
@@ -22,22 +24,48 @@ def flow_matching_target(x0: torch.Tensor, noise: torch.Tensor) -> torch.Tensor:
     return noise - x0
 
 
-def flow_matching_mse(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    if prediction.shape != target.shape:
-        raise ValueError(f"prediction and target shapes differ: {prediction.shape} vs {target.shape}")
-    return torch.mean((prediction - target) ** 2)
-
-
 def weighted_flow_matching_mse(
     prediction: torch.Tensor, target: torch.Tensor, weighting: torch.Tensor | None = None
 ) -> torch.Tensor:
     if prediction.shape != target.shape:
         raise ValueError(f"prediction and target shapes differ: {prediction.shape} vs {target.shape}")
-    loss = (prediction - target) ** 2
+    loss = (prediction.float() - target.float()) ** 2
     if weighting is not None:
-        weighting = _broadcast_sigma(weighting, loss)
-        loss = loss * weighting
-    return torch.mean(loss)
+        loss = loss * _broadcast_sigma(weighting, loss)
+    result = torch.mean(loss)
+    if not torch.isfinite(result):
+        raise FloatingPointError("Flow matching loss is not finite")
+    return result
+
+
+def flow_matching_mse(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    return weighted_flow_matching_mse(prediction, target)
+
+
+def sample_sd3_flow_timesteps(
+    scheduler: Any,
+    batch_size: int,
+    device: torch.device,
+    weighting_scheme: str = "logit_normal",
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    from diffusers.training_utils import (
+        compute_density_for_timestep_sampling,
+        compute_loss_weighting_for_sd3,
+    )
+
+    u = compute_density_for_timestep_sampling(
+        weighting_scheme=weighting_scheme,
+        batch_size=batch_size,
+        logit_mean=0.0,
+        logit_std=1.0,
+        mode_scale=1.29,
+    ).to(device)
+    num_train_timesteps = int(getattr(scheduler.config, "num_train_timesteps", 1000))
+    indices = (u * num_train_timesteps).long().clamp(0, num_train_timesteps - 1)
+    timesteps = scheduler.timesteps.to(device)[indices]
+    sigmas = scheduler.sigmas.to(device)[indices]
+    weighting = compute_loss_weighting_for_sd3(weighting_scheme=weighting_scheme, sigmas=sigmas)
+    return timesteps, sigmas, weighting
 
 
 def _broadcast_sigma(sigma: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
