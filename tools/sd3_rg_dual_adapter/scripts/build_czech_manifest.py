@@ -48,17 +48,35 @@ def choose_manifests(pairs: list[tuple[Path, Path, list[int]]]) -> dict[str, lis
         for class_id in classes:
             if class_id in by_class:
                 by_class[class_id].append(pair)
-    smoke: list[tuple[Path, Path, list[int]]] = []
-    micro: list[tuple[Path, Path, list[int]]] = []
-    for class_id in range(4):
-        candidates = by_class[class_id]
-        if not candidates:
-            raise RuntimeError(f"No train sample found for class {class_id}")
-        micro.append(candidates[0])
-        smoke.extend(candidates[:2] if len(candidates) >= 2 else candidates * 2)
+    micro = select_unique_by_class(by_class, per_class=1)
+    smoke = select_unique_by_class(by_class, per_class=2)
     if not negatives:
         raise RuntimeError("No negative train sample found")
-    return {"gpu_smoke8.csv": smoke[:8], "micro_overfit4.csv": micro[:4], "negative_smoke1.csv": negatives[:1]}
+    negative = sorted(negatives, key=lambda item: str(item[0]))[:1]
+    return {"gpu_smoke8.csv": smoke, "micro_overfit4.csv": micro, "negative_smoke1.csv": negative}
+
+
+def select_unique_by_class(
+    by_class: dict[int, list[tuple[Path, Path, list[int]]]],
+    per_class: int,
+) -> list[tuple[Path, Path, list[int]]]:
+    selected: list[tuple[Path, Path, list[int]]] = []
+    used_paths: set[Path] = set()
+    for class_id in range(4):
+        candidates = sorted(by_class[class_id], key=lambda item: (len(item[2]) != 1, str(item[0])))
+        class_selected: list[tuple[Path, Path, list[int]]] = []
+        for candidate in candidates:
+            image_path = candidate[0]
+            if image_path in used_paths:
+                continue
+            class_selected.append(candidate)
+            used_paths.add(image_path)
+            if len(class_selected) == per_class:
+                break
+        if len(class_selected) != per_class:
+            raise RuntimeError(f"Cannot select {per_class} unique samples for class {class_id}")
+        selected.extend(class_selected)
+    return selected
 
 
 def write_manifest(path: Path, rows: list[tuple[Path, Path, list[int]]]) -> None:

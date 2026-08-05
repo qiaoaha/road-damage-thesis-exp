@@ -29,5 +29,6 @@ class _VAE(nn.Module):
 
 def test_vae_shift_and_scaling() -> None:
     vae = _VAE()
-    latent = encode_latent(vae, torch.zeros(1, 3, 2, 2), torch.float32)
+    latent, input_dtype = encode_latent(vae, torch.zeros(1, 3, 2, 2), torch.float32)
     torch.testing.assert_close(latent, torch.full((1, 1, 1, 1), 4.0))
+    assert input_dtype == "torch.float32"

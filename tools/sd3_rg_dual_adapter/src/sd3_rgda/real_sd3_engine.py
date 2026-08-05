@@ -754,20 +754,20 @@ def run_full_real_validation(
     latent_channels = int(getattr(transformer.config, "in_channels", 16))
     patch_size = int(getattr(transformer.config, "patch_size", 2))
     flow_config = FlowTrainingConfig(precondition_outputs=precondition_outputs)
-    trainer = RealSD3RGDATrainer(
+    precheck_trainer = RealSD3RGDATrainer(
         transformer, scheduler, token_dim, latent_channels, patch_size, dtype, runtime_state, flow_config
     )
-    base_hash_before = trainer.base_parameter_hash()
+    base_hash_before = precheck_trainer.base_parameter_hash()
     runtime_state.mark_stage("zero_init")
     smoke_rows = validate_cache_manifest(smoke_cache.cache_manifest)
-    first_batch = trainer.build_flow_batch(trainer.load_cached_sample(smoke_rows[0]["cache_path"]))
-    zero = trainer.zero_init_equivalence(first_batch)
+    first_batch = precheck_trainer.build_flow_batch(precheck_trainer.load_cached_sample(smoke_rows[0]["cache_path"]))
+    zero = precheck_trainer.zero_init_equivalence(first_batch)
     runtime_state.mark_stage("two_step_gradient")
-    two_step = trainer.two_step_gradient_gate(first_batch)
+    two_step = precheck_trainer.two_step_gradient_gate(first_batch)
     negative_rows = validate_cache_manifest(negative_cache.cache_manifest)
-    negative_batch = trainer.build_flow_batch(trainer.load_cached_sample(negative_rows[0]["cache_path"]))
+    negative_batch = precheck_trainer.build_flow_batch(precheck_trainer.load_cached_sample(negative_rows[0]["cache_path"]))
     runtime_state.mark_stage("negative_gate")
-    negative = trainer.negative_mask_gate(negative_batch)
+    negative = precheck_trainer.negative_mask_gate(negative_batch)
     gates: list[GateResult] = [
         GateResult("SD3_FULL_LOAD", True, stats.__dict__),
         GateResult(
@@ -831,8 +831,12 @@ def run_full_real_validation(
         ),
     ]
     runtime_state.mark_stage("smoke100")
-    smoke_summary = run_training_loop(trainer, smoke_cache.cache_manifest, 100, report_dir / "smoke100_metrics.csv")
-    smoke_delta = sum(trainer.parameter_delta(smoke_summary.parameter_snapshot).values())
+    smoke_trainer = RealSD3RGDATrainer(
+        transformer, scheduler, token_dim, latent_channels, patch_size, dtype, runtime_state, flow_config
+    )
+    smoke_initial_parameter_hash = hash_module_parameters(smoke_trainer.injector)
+    smoke_summary = run_training_loop(smoke_trainer, smoke_cache.cache_manifest, 100, report_dir / "smoke100_metrics.csv")
+    smoke_delta = sum(smoke_trainer.parameter_delta(smoke_summary.parameter_snapshot).values())
     gates.append(
         GateResult(
             "SMOKE100",
@@ -840,6 +844,8 @@ def run_full_real_validation(
             {
                 "STEPS_COMPLETED": smoke_summary.steps_completed,
                 "SMOKE_REAL_SD3_FORWARD_COUNT": smoke_summary.forward_count_delta,
+                "SMOKE_STARTED_FROM_ZERO_INIT": "PASS",
+                "SMOKE_INITIAL_PARAMETER_HASH": smoke_initial_parameter_hash,
                 "ADAPTER_PARAMETER_DELTA": smoke_delta,
                 "GRADIENTS_FINITE": "PASS",
                 "RGDA_PARAMETERS_FINITE": "PASS",
@@ -852,6 +858,7 @@ def run_full_real_validation(
     micro_trainer = RealSD3RGDATrainer(
         transformer, scheduler, token_dim, latent_channels, patch_size, dtype, runtime_state, flow_config
     )
+    micro_initial_parameter_hash = hash_module_parameters(micro_trainer.injector)
     fixed_batches = build_fixed_flow_batches(micro_trainer, micro_cache.cache_manifest, seed)
     micro_summary = run_fixed_batch_training_loop(micro_trainer, fixed_batches, 500, report_dir / "micro500_metrics.csv")
     first = torch.median(torch.tensor(micro_summary.losses[:50]))
@@ -862,7 +869,7 @@ def run_full_real_validation(
     checkpoint_sample = micro_trainer.load_cached_sample(validate_cache_manifest(micro_cache.cache_manifest)[0]["cache_path"])
     runtime_state.mark_stage("checkpoint_reload")
     checkpoint_diff = micro_trainer.compare_outputs(checkpoint, micro_trainer.build_flow_batch(checkpoint_sample))
-    base_hash_after = trainer.base_parameter_hash()
+    base_hash_after = precheck_trainer.base_parameter_hash()
     gates.extend(
         [
             GateResult(
@@ -883,6 +890,8 @@ def run_full_real_validation(
                 {
                     "MICRO_FLOW_BATCHES_FIXED": True,
                     "MICRO_FIXED_BATCH_COUNT": len(fixed_batches),
+                    "MICRO_STARTED_FROM_ZERO_INIT": "PASS",
+                    "MICRO_INITIAL_PARAMETER_HASH": micro_initial_parameter_hash,
                     "MICRO_NOISE_HASHES": [hash_tensor_bytes(batch.noise) for batch in fixed_batches],
                     "MICRO_TIMESTEPS": [float(batch.timesteps.flatten()[0].detach().cpu()) for batch in fixed_batches],
                     "MICRO_SIGMAS": [float(batch.sigmas.flatten()[0].detach().cpu()) for batch in fixed_batches],
@@ -979,4 +988,6 @@ def _cache_report_passed(report: CacheBuildReport) -> bool:
         and is_cuda_device(report.text_encoder_device_during_encoding)
         and report.vae_parameter_dtype == "torch.float32"
         and report.vae_input_dtype == "torch.float32"
+        and report.cached_latent_dtype == "torch.bfloat16"
+        and report.latent_dtype == "torch.bfloat16"
     )

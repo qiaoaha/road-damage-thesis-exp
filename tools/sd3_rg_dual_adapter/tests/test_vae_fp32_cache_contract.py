@@ -32,9 +32,10 @@ class _VAE(nn.Module):
 def test_encode_latent_uses_fp32_input_and_bfloat16_cache() -> None:
     vae = _VAE()
     vae.to(device=torch.device("cpu"), dtype=torch.float32)
-    latent = encode_latent(vae, torch.zeros(1, 3, 2, 2, dtype=torch.bfloat16), torch.bfloat16)
+    latent, input_dtype = encode_latent(vae, torch.zeros(1, 3, 2, 2, dtype=torch.bfloat16), torch.bfloat16)
     assert str(next(vae.parameters()).dtype) == "torch.float32"
     assert vae.seen_input_dtype == torch.float32
+    assert input_dtype == "torch.float32"
     assert latent.dtype == torch.bfloat16
     assert float(latent.float().item()) == 4.0
 
@@ -59,3 +60,4 @@ def test_encode_all_latents_reports_fp32_contract() -> None:
     assert parameter_dtype == "torch.float32"
     assert input_dtype == "torch.float32"
     assert cached_dtype == "torch.bfloat16"
+    assert str(next(iter(_latents.values()))[0].dtype) == cached_dtype

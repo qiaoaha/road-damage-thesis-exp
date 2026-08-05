@@ -20,7 +20,7 @@ def _report(vae_device: str, text_device: str) -> CacheBuildReport:
         negative_token_mask_zero=True,
         vae_shift_factor=0.0,
         vae_scaling_factor=1.0,
-        latent_dtype="torch.float32",
+        latent_dtype="torch.bfloat16",
         latent_shape=(1, 16, 2, 2),
         vae_parameter_dtype="torch.float32",
         vae_input_dtype="torch.float32",

@@ -121,10 +121,13 @@ def encode_all_latents(
     vae_input_dtype = "unknown"
     with torch.no_grad():
         for request in requests:
-            target = encode_latent(vae, request.target_pixels, cache_dtype)
-            clean = encode_latent(vae, request.pseudo_clean_pixels, cache_dtype)
-            vae_input_dtype = "torch.float32"
+            target, target_input_dtype = encode_latent(vae, request.target_pixels, cache_dtype)
+            clean, clean_input_dtype = encode_latent(vae, request.pseudo_clean_pixels, cache_dtype)
+            if target_input_dtype != clean_input_dtype:
+                raise TypeError("VAE input dtype changed within cache build")
+            vae_input_dtype = target_input_dtype
             latents[request.sample_id] = (target, clean)
+    actual_cached_dtype = str(next(iter(latents.values()))[0].dtype) if latents else "unknown"
     vae.to("cpu")
     torch.cuda.empty_cache()
     config = getattr(vae, "config", object())
@@ -135,7 +138,7 @@ def encode_all_latents(
         float(getattr(config, "scaling_factor", 1.0)),
         vae_parameter_dtype,
         vae_input_dtype,
-        str(cache_dtype),
+        actual_cached_dtype,
     )
 
 
@@ -285,8 +288,9 @@ def build_pseudo_clean_image(image: Image.Image, boxes: tuple[Box, ...]) -> Imag
     return clean
 
 
-def encode_latent(vae: Any, image_tensor: torch.Tensor, cache_dtype: torch.dtype) -> torch.Tensor:
+def encode_latent(vae: Any, image_tensor: torch.Tensor, cache_dtype: torch.dtype) -> tuple[torch.Tensor, str]:
     image_tensor = image_tensor.to(device=_module_device(vae), dtype=torch.float32)
+    actual_input_dtype = str(image_tensor.dtype)
     if image_tensor.dtype != torch.float32:
         raise TypeError("VAE input must be float32")
     latent = vae.encode(image_tensor).latent_dist.sample()
@@ -294,7 +298,7 @@ def encode_latent(vae: Any, image_tensor: torch.Tensor, cache_dtype: torch.dtype
     shift_factor = float(getattr(config, "shift_factor", 0.0))
     scaling_factor = float(getattr(config, "scaling_factor", 1.0))
     latent = (torch.as_tensor(latent).float() - shift_factor) * scaling_factor
-    return latent.to(dtype=cache_dtype).detach().cpu()
+    return latent.to(dtype=cache_dtype).detach().cpu(), actual_input_dtype
 
 
 def encode_prompt(pipe: Any, prompt: str, device: torch.device, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
