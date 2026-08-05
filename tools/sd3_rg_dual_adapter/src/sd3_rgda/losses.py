@@ -62,16 +62,20 @@ def sample_sd3_flow_timesteps(
     ).to(device)
     num_train_timesteps = int(getattr(scheduler.config, "num_train_timesteps", 1000))
     available = min(num_train_timesteps, len(scheduler.timesteps), len(scheduler.sigmas))
-    if available <= 0:
-        raise ValueError("Scheduler has no available timesteps/sigmas for sampling")
-    indices = (u * available).long().clamp(0, available - 1)
+    if scheduler.timesteps.ndim != 1:
+        raise ValueError("Scheduler timesteps must be one-dimensional")
+    if scheduler.sigmas.ndim != 1:
+        raise ValueError("Scheduler sigmas must be one-dimensional")
+    if available != num_train_timesteps:
+        raise ValueError("Scheduler training arrays do not match num_train_timesteps")
+    indices = (u * num_train_timesteps).long().clamp(0, num_train_timesteps - 1)
     timesteps = scheduler.timesteps.to(device)[indices]
     sigmas = scheduler.sigmas.to(device)[indices]
     weighting = compute_loss_weighting_for_sd3(weighting_scheme=weighting_scheme, sigmas=sigmas)
     return timesteps, sigmas, weighting
 
 
-def _broadcast_sigma(sigma: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+def broadcast_sigma(sigma: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
     if sigma.ndim == 0:
         sigma = sigma.reshape(1)
     while sigma.ndim < reference.ndim:
@@ -79,3 +83,7 @@ def _broadcast_sigma(sigma: torch.Tensor, reference: torch.Tensor) -> torch.Tens
     if sigma.shape[0] not in (1, reference.shape[0]):
         raise ValueError(f"sigma batch {sigma.shape[0]} incompatible with reference batch {reference.shape[0]}")
     return sigma.to(device=reference.device, dtype=reference.dtype)
+
+
+def _broadcast_sigma(sigma: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+    return broadcast_sigma(sigma, reference)

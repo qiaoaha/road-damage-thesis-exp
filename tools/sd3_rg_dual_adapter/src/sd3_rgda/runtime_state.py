@@ -15,3 +15,13 @@ class RuntimeState:
 
     def mark_stage(self, stage: str) -> None:
         self.current_stage = stage
+
+    def record_oom(self) -> None:
+        self.oom_count += 1
+
+    def ensure_oom_recorded(self) -> None:
+        if self.oom_count == 0:
+            self.oom_count = 1
+
+    def record_nan_inf(self) -> None:
+        self.nan_inf_count += 1

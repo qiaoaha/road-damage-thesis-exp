@@ -41,11 +41,11 @@ class _MutableScheduler:
         self.sigmas = torch.linspace(1.0, 0.0, count)
 
 
-def test_prepare_training_scheduler_calls_set_timesteps() -> None:
-    scheduler = _MutableScheduler()
+def test_prepare_training_scheduler_does_not_call_set_timesteps() -> None:
+    scheduler = _MutableScheduler(timesteps=4, sigmas=4)
     prepared = prepare_training_scheduler(scheduler)
     assert prepared is scheduler
-    assert scheduler.called_with == 4
+    assert scheduler.called_with is None
     assert len(scheduler.timesteps) == 4
     assert len(scheduler.sigmas) == 4
 

@@ -57,6 +57,9 @@ class CacheBuildReport:
     vae_scaling_factor: float
     latent_dtype: str
     latent_shape: tuple[int, ...]
+    vae_parameter_dtype: str = "unknown"
+    vae_input_dtype: str = "unknown"
+    cached_latent_dtype: str = "unknown"
 
 
 CACHE_MANIFEST_FIELDS = [
@@ -108,16 +111,19 @@ def encode_all_latents(
     vae: Any,
     requests: list[CacheRequest],
     device: torch.device,
-    dtype: torch.dtype,
-) -> tuple[dict[int, tuple[torch.Tensor, torch.Tensor]], str, float, float]:
-    vae.to(device=device, dtype=dtype)
+    cache_dtype: torch.dtype,
+) -> tuple[dict[int, tuple[torch.Tensor, torch.Tensor]], str, float, float, str, str, str]:
+    vae.to(device=device, dtype=torch.float32)
     vae.eval()
     actual_device = _module_device(vae)
+    vae_parameter_dtype = _module_parameter_dtype(vae)
     latents: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+    vae_input_dtype = "unknown"
     with torch.no_grad():
         for request in requests:
-            target = encode_latent(vae, request.target_pixels, dtype)
-            clean = encode_latent(vae, request.pseudo_clean_pixels, dtype)
+            target = encode_latent(vae, request.target_pixels, cache_dtype)
+            clean = encode_latent(vae, request.pseudo_clean_pixels, cache_dtype)
+            vae_input_dtype = "torch.float32"
             latents[request.sample_id] = (target, clean)
     vae.to("cpu")
     torch.cuda.empty_cache()
@@ -127,6 +133,9 @@ def encode_all_latents(
         str(actual_device),
         float(getattr(config, "shift_factor", 0.0)),
         float(getattr(config, "scaling_factor", 1.0)),
+        vae_parameter_dtype,
+        vae_input_dtype,
+        str(cache_dtype),
     )
 
 
@@ -211,7 +220,9 @@ def cache_manifest_rows(
 ) -> CacheBuildReport:
     device = torch.device("cuda")
     requests = collect_cache_requests(manifest, resolution)
-    latents, vae_device, shift_factor, scaling_factor = encode_all_latents(pipe.vae, requests, device, dtype)
+    latents, vae_device, shift_factor, scaling_factor, vae_parameter_dtype, vae_input_dtype, cached_latent_dtype = (
+        encode_all_latents(pipe.vae, requests, device, dtype)
+    )
     prompt_embeddings, text_device = encode_unique_prompts(pipe, [request.prompt for request in requests], device, dtype)
     cache_manifest, samples = write_cache_samples(requests, latents, prompt_embeddings, out_dir, patch_size)
     manifest_rows = validate_cache_manifest(cache_manifest, expected_rows=len(requests))
@@ -232,6 +243,9 @@ def cache_manifest_rows(
         vae_scaling_factor=scaling_factor,
         latent_dtype=str(first_latent.dtype),
         latent_shape=tuple(int(item) for item in first_latent.shape),
+        vae_parameter_dtype=vae_parameter_dtype,
+        vae_input_dtype=vae_input_dtype,
+        cached_latent_dtype=cached_latent_dtype,
     )
 
 
@@ -271,14 +285,16 @@ def build_pseudo_clean_image(image: Image.Image, boxes: tuple[Box, ...]) -> Imag
     return clean
 
 
-def encode_latent(vae: Any, image_tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
-    image_tensor = image_tensor.to(device=_module_device(vae), dtype=dtype)
+def encode_latent(vae: Any, image_tensor: torch.Tensor, cache_dtype: torch.dtype) -> torch.Tensor:
+    image_tensor = image_tensor.to(device=_module_device(vae), dtype=torch.float32)
+    if image_tensor.dtype != torch.float32:
+        raise TypeError("VAE input must be float32")
     latent = vae.encode(image_tensor).latent_dist.sample()
     config = getattr(vae, "config", object())
     shift_factor = float(getattr(config, "shift_factor", 0.0))
     scaling_factor = float(getattr(config, "scaling_factor", 1.0))
-    latent = (latent - shift_factor) * scaling_factor
-    return torch.as_tensor(latent).detach().cpu()
+    latent = (torch.as_tensor(latent).float() - shift_factor) * scaling_factor
+    return latent.to(dtype=cache_dtype).detach().cpu()
 
 
 def encode_prompt(pipe: Any, prompt: str, device: torch.device, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
@@ -331,6 +347,15 @@ def _module_device(module: Any) -> torch.device:
         if first is not None:
             return torch.device(first.device)
     return torch.device("cpu")
+
+
+def _module_parameter_dtype(module: Any) -> str:
+    parameters = getattr(module, "parameters", None)
+    if callable(parameters):
+        first = next(parameters(), None)
+        if first is not None:
+            return str(first.dtype)
+    return "unknown"
 
 
 def _resize_boxes(boxes: tuple[Box, ...], source: tuple[int, int], target: tuple[int, int]) -> tuple[Box, ...]:

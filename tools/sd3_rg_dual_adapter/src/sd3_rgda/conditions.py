@@ -75,14 +75,17 @@ def build_rg_map(boxes: list[Box] | tuple[Box, ...], image_size: tuple[int, int]
 def downsample_rg_map(rg_map: torch.Tensor, latent_size: tuple[int, int]) -> torch.Tensor:
     if rg_map.ndim != 3 or rg_map.shape[0] != 7:
         raise ValueError(f"Expected RG map [7,H,W], got {tuple(rg_map.shape)}")
-    return F.interpolate(
-        rg_map.unsqueeze(0), size=latent_size, mode="bilinear", align_corners=False
-    ).squeeze(0).clamp(0.0, 1.0)
+    source = rg_map.unsqueeze(0)
+    binary_channels = torch.cat([source[:, 0:2], source[:, 3:7]], dim=1)
+    binary_down = F.adaptive_max_pool2d(binary_channels, output_size=latent_size)
+    distance_down = F.interpolate(source[:, 2:3], size=latent_size, mode="bilinear", align_corners=False)
+    output = torch.cat([binary_down[:, 0:2], distance_down, binary_down[:, 2:6]], dim=1)
+    return output.squeeze(0).clamp(0.0, 1.0)
 
 
 def token_region_mask(rg_map: torch.Tensor, patch_size: int) -> torch.Tensor:
     if patch_size <= 0:
         raise ValueError("patch_size must be positive")
     union = rg_map[0:1].unsqueeze(0)
-    pooled = F.avg_pool2d(union, kernel_size=patch_size, stride=patch_size)
-    return (pooled.flatten(2).transpose(1, 2) > 0).to(dtype=rg_map.dtype)
+    pooled = F.max_pool2d(union, kernel_size=patch_size, stride=patch_size)
+    return pooled.flatten(2).transpose(1, 2).gt(0.5).to(dtype=rg_map.dtype)

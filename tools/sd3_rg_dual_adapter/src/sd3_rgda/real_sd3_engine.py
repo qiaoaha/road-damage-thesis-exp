@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import csv
 import hashlib
+import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,7 @@ from sd3_rgda.checkpoint import (
 )
 from sd3_rgda.injector import RGDAConditionBatch, RGDAInjector, RGDAPatchHook
 from sd3_rgda.losses import (
+    broadcast_sigma,
     flow_matching_target,
     sample_noisy_latent,
     sample_sd3_flow_timesteps,
@@ -61,6 +63,14 @@ class FlowBatch:
     weighting: torch.Tensor
     noisy_latent: torch.Tensor
     target: torch.Tensor
+    clean_latent: torch.Tensor | None = None
+    raw_target_velocity: torch.Tensor | None = None
+
+
+@dataclass(frozen=True)
+class FlowTrainingConfig:
+    precondition_outputs: bool = True
+    weighting_scheme: str = "logit_normal"
 
 
 @dataclass(frozen=True)
@@ -70,6 +80,9 @@ class TrainingLoopSummary:
     steps_completed: int
     peak_allocated_mib: float
     peak_reserved_mib: float
+    forward_count_before: int
+    forward_count_after: int
+    forward_count_delta: int
 
 
 def load_sd3_pipeline(model_path: str | Path, dtype: torch.dtype) -> Any:
@@ -217,6 +230,7 @@ class RealSD3RGDATrainer:
         patch_size: int,
         dtype: torch.dtype,
         runtime_state: RuntimeState | None = None,
+        flow_config: FlowTrainingConfig | None = None,
     ) -> None:
         self.transformer = transformer
         self.scheduler = scheduler
@@ -227,6 +241,7 @@ class RealSD3RGDATrainer:
         )
         self.wrapper = SD3RGTransformerWrapper(transformer, self.injector)
         self.runtime_state = runtime_state or RuntimeState()
+        self.flow_config = flow_config or FlowTrainingConfig()
         modules = self.injector.trainable_modules()
         self.optimizer = torch.optim.AdamW(
             [
@@ -260,11 +275,24 @@ class RealSD3RGDATrainer:
     def build_flow_batch(self, sample: CachedSD3Sample) -> FlowBatch:
         noise = torch.randn_like(sample.target_latent)
         timesteps, sigmas, weighting = sample_sd3_flow_timesteps(
-            self.scheduler, sample.target_latent.shape[0], self.device
+            self.scheduler,
+            sample.target_latent.shape[0],
+            self.device,
+            weighting_scheme=self.flow_config.weighting_scheme,
         )
         noisy_latent = sample_noisy_latent(sample.target_latent, noise, sigmas)
-        target = flow_matching_target(sample.target_latent, noise)
-        return FlowBatch(sample, noise, timesteps, sigmas, weighting, noisy_latent, target)
+        raw_target_velocity = flow_matching_target(sample.target_latent, noise)
+        return FlowBatch(
+            sample=sample,
+            noise=noise,
+            timesteps=timesteps,
+            sigmas=sigmas,
+            weighting=weighting,
+            noisy_latent=noisy_latent,
+            target=raw_target_velocity,
+            clean_latent=sample.target_latent,
+            raw_target_velocity=raw_target_velocity,
+        )
 
     def forward_loss(self, batch: FlowBatch) -> torch.Tensor:
         condition = RGDAConditionBatch(
@@ -273,7 +301,7 @@ class RealSD3RGDATrainer:
             token_mask=batch.sample.token_mask,
             timesteps=batch.timesteps,
         )
-        prediction = self.wrapper(
+        raw_prediction = self.wrapper(
             hidden_states=batch.noisy_latent,
             encoder_hidden_states=batch.sample.prompt_embeds,
             pooled_projections=batch.sample.pooled_prompt_embeds,
@@ -282,15 +310,27 @@ class RealSD3RGDATrainer:
             return_dict=True,
         ).sample
         self.runtime_state.forward_count += 1
-        if prediction.shape != batch.target.shape:
-            raise ValueError(f"prediction shape {prediction.shape} != target shape {batch.target.shape}")
+        flow_config = getattr(self, "flow_config", FlowTrainingConfig())
+        clean_latent = getattr(batch, "clean_latent", None)
+        target = clean_latent if flow_config.precondition_outputs else batch.target
+        if target is None:
+            target = getattr(batch.sample, "target_latent", batch.target) if flow_config.precondition_outputs else batch.target
+        if flow_config.precondition_outputs:
+            sigma = broadcast_sigma(batch.sigmas, raw_prediction)
+            prediction = raw_prediction.float() * (-sigma.float()) + batch.noisy_latent.float()
+            target = target.float()
+        else:
+            prediction = raw_prediction.float()
+            target = target.float()
+        if prediction.shape != target.shape:
+            raise ValueError(f"prediction shape {prediction.shape} != target shape {target.shape}")
         if not torch.isfinite(prediction).all():
-            self.runtime_state.nan_inf_count += 1
+            self.runtime_state.record_nan_inf()
             raise FloatingPointError("prediction contains non-finite values")
         try:
-            loss = weighted_flow_matching_mse(prediction, batch.target, batch.weighting)
+            loss = weighted_flow_matching_mse(prediction, target, batch.weighting)
         except FloatingPointError:
-            self.runtime_state.nan_inf_count += 1
+            self.runtime_state.record_nan_inf()
             raise
         if not loss.requires_grad:
             raise RuntimeError("loss.requires_grad is false")
@@ -307,10 +347,19 @@ class RealSD3RGDATrainer:
         try:
             loss = self.forward_loss(batch)
             loss.backward()  # type: ignore[no-untyped-call]
-            grad_norm = float(torch.nn.utils.clip_grad_norm_(self.injector.parameters(), 1.0))
+            grad_norm_raw = torch.nn.utils.clip_grad_norm_(self.injector.parameters(), 1.0)
+            grad_norm = float(grad_norm_raw.detach().float().cpu() if isinstance(grad_norm_raw, torch.Tensor) else grad_norm_raw)
+            if not math.isfinite(grad_norm):
+                self.runtime_state.record_nan_inf()
+                raise FloatingPointError("Gradient norm is non-finite")
+            try:
+                ensure_module_gradients_finite(self.injector)
+            except FloatingPointError:
+                self.runtime_state.record_nan_inf()
+                raise
             self.assert_base_gradients_none()
         except torch.cuda.OutOfMemoryError:
-            self.runtime_state.oom_count += 1
+            self.runtime_state.record_oom()
             raise
         return {
             "loss": float(loss.detach().cpu()),
@@ -322,6 +371,11 @@ class RealSD3RGDATrainer:
 
     def optimizer_step(self) -> None:
         self.optimizer.step()
+        try:
+            ensure_module_parameters_finite(self.injector)
+        except FloatingPointError:
+            self.runtime_state.record_nan_inf()
+            raise
         self.runtime_state.steps_completed += 1
 
     def gradient_report(self) -> dict[str, float]:
@@ -487,6 +541,7 @@ def run_training_loop(
 ) -> TrainingLoopSummary:
     rows = validate_cache_manifest(cache_manifest)
     before = {name: parameter.detach().cpu().clone() for name, parameter in trainer.injector.named_parameters()}
+    forward_before = getattr(trainer, "runtime_state", RuntimeState()).forward_count
     losses: list[float] = []
     _reset_peak_memory_stats_if_cuda()
     with Path(metrics_csv).open("w", encoding="utf-8", newline="") as handle:
@@ -509,12 +564,16 @@ def run_training_loop(
             metrics = trainer.backward_step(batch)
             losses.append(metrics["loss"])
             writer.writerow({"step": step + 1, "sample_id": row["sample_id"], **metrics})
+    forward_after = getattr(trainer, "runtime_state", RuntimeState(forward_count=forward_before + len(losses))).forward_count
     return TrainingLoopSummary(
         losses=losses,
         parameter_snapshot=before,
         steps_completed=len(losses),
         peak_allocated_mib=_max_memory_allocated_mib(),
         peak_reserved_mib=_max_memory_reserved_mib(),
+        forward_count_before=forward_before,
+        forward_count_after=forward_after,
+        forward_count_delta=forward_after - forward_before,
     )
 
 
@@ -542,6 +601,7 @@ def run_fixed_batch_training_loop(
     if not fixed_batches:
         raise ValueError("fixed_batches must not be empty")
     before = {name: parameter.detach().cpu().clone() for name, parameter in trainer.injector.named_parameters()}
+    forward_before = getattr(trainer, "runtime_state", RuntimeState()).forward_count
     losses: list[float] = []
     _reset_peak_memory_stats_if_cuda()
     with Path(metrics_csv).open("w", encoding="utf-8", newline="") as handle:
@@ -555,16 +615,27 @@ def run_fixed_batch_training_loop(
             metrics = trainer.backward_step(batch)
             losses.append(metrics["loss"])
             writer.writerow({"step": step + 1, "sample_id": step % len(fixed_batches), **metrics})
+    forward_after = getattr(trainer, "runtime_state", RuntimeState(forward_count=forward_before + len(losses))).forward_count
     return TrainingLoopSummary(
         losses=losses,
         parameter_snapshot=before,
         steps_completed=len(losses),
         peak_allocated_mib=_max_memory_allocated_mib(),
         peak_reserved_mib=_max_memory_reserved_mib(),
+        forward_count_before=forward_before,
+        forward_count_after=forward_after,
+        forward_count_delta=forward_after - forward_before,
     )
 
 
-def scheduler_report(scheduler: Any) -> dict[str, object]:
+def scheduler_report(
+    scheduler: Any,
+    *,
+    timesteps_hash_before: str | None = None,
+    timesteps_hash_after: str | None = None,
+    sigmas_hash_before: str | None = None,
+    sigmas_hash_after: str | None = None,
+) -> dict[str, object]:
     config = getattr(scheduler, "config", object())
     timesteps = scheduler.timesteps
     sigmas = scheduler.sigmas
@@ -579,18 +650,32 @@ def scheduler_report(scheduler: Any) -> dict[str, object]:
         "AVAILABLE_TIMESTEP_COUNT": len(timesteps),
         "AVAILABLE_SIGMA_COUNT": len(sigmas),
         "SAMPLING_INDEX_UPPER_BOUND": min(num_train_timesteps, len(timesteps), len(sigmas)) - 1,
+        "SCHEDULER_MUTATED_AFTER_LOAD": "NO"
+        if timesteps_hash_before == timesteps_hash_after and sigmas_hash_before == sigmas_hash_after
+        else "YES",
+        "TIMESTEPS_HASH_BEFORE": timesteps_hash_before or "",
+        "TIMESTEPS_HASH_AFTER": timesteps_hash_after or "",
+        "SIGMAS_HASH_BEFORE": sigmas_hash_before or "",
+        "SIGMAS_HASH_AFTER": sigmas_hash_after or "",
     }
 
 
 def prepare_training_scheduler(scheduler: Any) -> Any:
-    config = getattr(scheduler, "config", object())
-    num_train_timesteps = int(getattr(config, "num_train_timesteps", 1000))
-    set_timesteps = getattr(scheduler, "set_timesteps", None)
-    if callable(set_timesteps):
-        set_timesteps(num_train_timesteps)
-    if len(getattr(scheduler, "timesteps", [])) < num_train_timesteps:
+    config = getattr(scheduler, "config", None)
+    if config is None:
+        raise ValueError("Scheduler config is missing")
+    num_train_timesteps = int(getattr(config, "num_train_timesteps", 0))
+    if num_train_timesteps <= 0:
+        raise ValueError("Invalid scheduler num_train_timesteps")
+    timesteps = getattr(scheduler, "timesteps", None)
+    sigmas = getattr(scheduler, "sigmas", None)
+    if not isinstance(timesteps, torch.Tensor):
+        raise TypeError("Scheduler timesteps must be a tensor")
+    if not isinstance(sigmas, torch.Tensor):
+        raise TypeError("Scheduler sigmas must be a tensor")
+    if len(timesteps) < num_train_timesteps:
         raise ValueError("Scheduler timesteps shorter than num_train_timesteps")
-    if len(getattr(scheduler, "sigmas", [])) < num_train_timesteps:
+    if len(sigmas) < num_train_timesteps:
         raise ValueError("Scheduler sigmas shorter than num_train_timesteps")
     return scheduler
 
@@ -633,6 +718,7 @@ def run_full_real_validation(
     dtype: torch.dtype,
     seed: int,
     runtime_state: RuntimeState | None = None,
+    precondition_outputs: bool = True,
 ) -> None:
     runtime_state = runtime_state or RuntimeState()
     torch.manual_seed(seed)
@@ -644,14 +730,33 @@ def run_full_real_validation(
     micro_cache = cache_manifest_rows(pipe, micro_manifest, report_dir / "cache_micro4", resolution, dtype, patch_size=2)
     runtime_state.mark_stage("cache_negative1")
     negative_cache = cache_manifest_rows(pipe, negative_manifest, report_dir / "cache_negative1", resolution, dtype, patch_size=2)
-    scheduler = prepare_training_scheduler(copy.deepcopy(pipe.scheduler))
+    runtime_state.mark_stage("prepare_scheduler")
+    scheduler = copy.deepcopy(pipe.scheduler)
+    scheduler_timesteps_hash_before = hash_tensor_bytes(scheduler.timesteps)
+    scheduler_sigmas_hash_before = hash_tensor_bytes(scheduler.sigmas)
+    scheduler = prepare_training_scheduler(scheduler)
+    scheduler_timesteps_hash_after = hash_tensor_bytes(scheduler.timesteps)
+    scheduler_sigmas_hash_after = hash_tensor_bytes(scheduler.sigmas)
+    if scheduler_timesteps_hash_before != scheduler_timesteps_hash_after:
+        raise RuntimeError("Scheduler timesteps mutated after load")
+    if scheduler_sigmas_hash_before != scheduler_sigmas_hash_after:
+        raise RuntimeError("Scheduler sigmas mutated after load")
     runtime_state.mark_stage("prepare_transformer")
     transformer, stats = prepare_transformer_from_pipeline(pipe)
-    scheduler_info = scheduler_report(scheduler)
+    scheduler_info = scheduler_report(
+        scheduler,
+        timesteps_hash_before=scheduler_timesteps_hash_before,
+        timesteps_hash_after=scheduler_timesteps_hash_after,
+        sigmas_hash_before=scheduler_sigmas_hash_before,
+        sigmas_hash_after=scheduler_sigmas_hash_after,
+    )
     token_dim = int(getattr(transformer.config, "caption_projection_dim", 1536))
     latent_channels = int(getattr(transformer.config, "in_channels", 16))
     patch_size = int(getattr(transformer.config, "patch_size", 2))
-    trainer = RealSD3RGDATrainer(transformer, scheduler, token_dim, latent_channels, patch_size, dtype, runtime_state)
+    flow_config = FlowTrainingConfig(precondition_outputs=precondition_outputs)
+    trainer = RealSD3RGDATrainer(
+        transformer, scheduler, token_dim, latent_channels, patch_size, dtype, runtime_state, flow_config
+    )
     base_hash_before = trainer.base_parameter_hash()
     runtime_state.mark_stage("zero_init")
     smoke_rows = validate_cache_manifest(smoke_cache.cache_manifest)
@@ -670,7 +775,31 @@ def run_full_real_validation(
             _cache_report_passed(smoke_cache) and _cache_report_passed(micro_cache) and _cache_report_passed(negative_cache),
             {"CACHE_ROWS": smoke_cache.cache_rows, "UNIQUE_PROMPT_COUNT": smoke_cache.unique_prompt_count},
         ),
-        GateResult("MODEL_SCHEDULER_PRESERVED", True, scheduler_info),
+        GateResult(
+            "MODEL_SCHEDULER_PRESERVED",
+            scheduler_info["SCHEDULER_MUTATED_AFTER_LOAD"] == "NO",
+            scheduler_info,
+        ),
+        GateResult(
+            "VAE_FP32_CACHE",
+            _cache_report_passed(smoke_cache) and _cache_report_passed(micro_cache) and _cache_report_passed(negative_cache),
+            {
+                "VAE_PARAMETER_DTYPE": smoke_cache.vae_parameter_dtype,
+                "VAE_INPUT_DTYPE": smoke_cache.vae_input_dtype,
+                "CACHED_LATENT_DTYPE": smoke_cache.cached_latent_dtype,
+            },
+        ),
+        GateResult(
+            "FLOW_PRECONDITIONING",
+            flow_config.precondition_outputs,
+            {
+                "PRECONDITION_OUTPUTS": "YES",
+                "FLOW_RAW_MODEL_OUTPUT": "VELOCITY",
+                "FLOW_LOSS_PREDICTION": "PRECONDITIONED_CLEAN_LATENT",
+                "FLOW_TARGET": "CLEAN_LATENT",
+                "WEIGHTING_SCHEME": flow_config.weighting_scheme,
+            },
+        ),
         GateResult("PATCH_EMBED_INJECTION", True, {"PATCH_MODULE_NAME": stats.patch_module_name}),
         GateResult(
             "ZERO_INIT_EQUIVALENCE",
@@ -707,17 +836,22 @@ def run_full_real_validation(
     gates.append(
         GateResult(
             "SMOKE100",
-            smoke_summary.steps_completed == 100 and smoke_delta > 0,
+            smoke_summary.steps_completed == 100 and smoke_summary.forward_count_delta == 100 and smoke_delta > 0,
             {
                 "STEPS_COMPLETED": smoke_summary.steps_completed,
+                "SMOKE_REAL_SD3_FORWARD_COUNT": smoke_summary.forward_count_delta,
                 "ADAPTER_PARAMETER_DELTA": smoke_delta,
+                "GRADIENTS_FINITE": "PASS",
+                "RGDA_PARAMETERS_FINITE": "PASS",
                 "PEAK_ALLOCATED_MIB": smoke_summary.peak_allocated_mib,
                 "PEAK_RESERVED_MIB": smoke_summary.peak_reserved_mib,
             },
         )
     )
     runtime_state.mark_stage("micro500")
-    micro_trainer = RealSD3RGDATrainer(transformer, scheduler, token_dim, latent_channels, patch_size, dtype, runtime_state)
+    micro_trainer = RealSD3RGDATrainer(
+        transformer, scheduler, token_dim, latent_channels, patch_size, dtype, runtime_state, flow_config
+    )
     fixed_batches = build_fixed_flow_batches(micro_trainer, micro_cache.cache_manifest, seed)
     micro_summary = run_fixed_batch_training_loop(micro_trainer, fixed_batches, 500, report_dir / "micro500_metrics.csv")
     first = torch.median(torch.tensor(micro_summary.losses[:50]))
@@ -733,8 +867,15 @@ def run_full_real_validation(
         [
             GateResult(
                 "REAL_SD3_FORWARD",
-                micro_trainer.forward_count >= 500,
-                {"REAL_SD3_FORWARD_COUNT": micro_trainer.forward_count},
+                micro_summary.forward_count_delta == 500,
+                {
+                    "TOTAL_REAL_SD3_FORWARD_COUNT": runtime_state.forward_count,
+                    "SMOKE_REAL_SD3_FORWARD_COUNT": smoke_summary.forward_count_delta,
+                    "MICRO_REAL_SD3_FORWARD_COUNT": micro_summary.forward_count_delta,
+                    "PRECHECK_REAL_SD3_FORWARD_COUNT": runtime_state.forward_count
+                    - smoke_summary.forward_count_delta
+                    - micro_summary.forward_count_delta,
+                },
             ),
             GateResult(
                 "MICRO_FIXED_FLOW_BATCH",
@@ -749,8 +890,14 @@ def run_full_real_validation(
             ),
             GateResult(
                 "MICRO_OVERFIT500",
-                bool(last <= first * 0.70),
-                {"MEDIAN_FIRST50": float(first), "MEDIAN_LAST50": float(last)},
+                bool(last <= first * 0.70) and micro_summary.forward_count_delta == 500,
+                {
+                    "MEDIAN_FIRST50": float(first),
+                    "MEDIAN_LAST50": float(last),
+                    "MICRO_REAL_SD3_FORWARD_COUNT": micro_summary.forward_count_delta,
+                    "GRADIENTS_FINITE": "PASS",
+                    "RGDA_PARAMETERS_FINITE": "PASS",
+                },
             ),
             GateResult(
                 "CHECKPOINT_RELOAD",
@@ -791,6 +938,18 @@ def _module_grad_norm(module: nn.Module) -> float:
     return total
 
 
+def ensure_module_gradients_finite(module: nn.Module) -> None:
+    for name, parameter in module.named_parameters():
+        if parameter.grad is not None and not torch.isfinite(parameter.grad).all():
+            raise FloatingPointError(f"Non-finite gradient: {name}")
+
+
+def ensure_module_parameters_finite(module: nn.Module) -> None:
+    for name, parameter in module.named_parameters():
+        if not torch.isfinite(parameter).all():
+            raise FloatingPointError(f"Non-finite RGDA parameter: {name}")
+
+
 def _max_abs_or_inf(tensor: torch.Tensor | None) -> float:
     return float(tensor.abs().max().cpu()) if tensor is not None else float("inf")
 
@@ -818,4 +977,6 @@ def _cache_report_passed(report: CacheBuildReport) -> bool:
         and report.negative_token_mask_zero
         and is_cuda_device(report.vae_device_during_encoding)
         and is_cuda_device(report.text_encoder_device_during_encoding)
+        and report.vae_parameter_dtype == "torch.float32"
+        and report.vae_input_dtype == "torch.float32"
     )

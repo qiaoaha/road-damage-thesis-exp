@@ -44,4 +44,5 @@ fi
   --report-dir "${REPORT_DIR}" \
   --resolution 512 \
   --dtype bfloat16 \
+  --precondition-outputs \
   --seed 2026

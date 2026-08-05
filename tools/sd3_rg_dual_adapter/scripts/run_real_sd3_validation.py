@@ -30,6 +30,7 @@ def main() -> int:
     parser.add_argument("--resolution", type=int, default=512)
     parser.add_argument("--dtype", choices=["bfloat16", "float16", "float32"], default="bfloat16")
     parser.add_argument("--seed", type=int, default=2026)
+    parser.add_argument("--precondition-outputs", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
     state = RuntimeState()
     try:
@@ -46,10 +47,11 @@ def main() -> int:
             resolution=args.resolution,
             dtype=parse_dtype(args.dtype),
             seed=args.seed,
+            precondition_outputs=args.precondition_outputs,
             runtime_state=state,
         )
     except torch.cuda.OutOfMemoryError as exc:
-        state.oom_count += 1
+        state.ensure_oom_recorded()
         write_failure_report(args.report_dir, state.current_stage, exc, state.oom_count, state.nan_inf_count)
         raise
     except BaseException as exc:

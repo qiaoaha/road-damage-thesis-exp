@@ -5,7 +5,7 @@ import types
 import pytest
 import torch
 
-from sd3_rgda.real_sd3_engine import RealSD3RGDATrainer, write_failure_report
+from sd3_rgda.real_sd3_engine import FlowTrainingConfig, RealSD3RGDATrainer, write_failure_report
 from sd3_rgda.runtime_state import RuntimeState
 
 
@@ -19,6 +19,7 @@ def test_backward_only_records_oom_once() -> None:
     state = RuntimeState()
     trainer = object.__new__(RealSD3RGDATrainer)
     trainer.runtime_state = state
+    trainer.flow_config = FlowTrainingConfig(precondition_outputs=False)
     trainer.optimizer = types.SimpleNamespace(zero_grad=lambda set_to_none=True: None)
 
     def _raise_oom(batch):  # type: ignore[no-untyped-def]
@@ -34,6 +35,7 @@ def test_forward_loss_records_nonfinite_prediction_once() -> None:
     state = RuntimeState()
     trainer = object.__new__(RealSD3RGDATrainer)
     trainer.runtime_state = state
+    trainer.flow_config = FlowTrainingConfig(precondition_outputs=False)
 
     class _Wrapper:
         def __call__(self, **kwargs):  # type: ignore[no-untyped-def]
