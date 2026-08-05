@@ -5,7 +5,7 @@ from pathlib import Path
 
 import torch
 
-from sd3_rgda.real_sd3_engine import run_full_real_validation
+from sd3_rgda.real_sd3_engine import run_full_real_validation, write_failure_report
 
 
 def parse_dtype(name: str) -> torch.dtype:
@@ -30,20 +30,32 @@ def main() -> int:
     parser.add_argument("--dtype", choices=["bfloat16", "float16", "float32"], default="bfloat16")
     parser.add_argument("--seed", type=int, default=2026)
     args = parser.parse_args()
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is required for executable real SD3-RGDA validation")
-    if not args.dataset_root.exists():
-        raise FileNotFoundError(args.dataset_root)
-    run_full_real_validation(
-        model_path=args.model_path,
-        smoke_manifest=args.smoke_manifest,
-        micro_manifest=args.micro_manifest,
-        negative_manifest=args.negative_manifest,
-        report_dir=args.report_dir,
-        resolution=args.resolution,
-        dtype=parse_dtype(args.dtype),
-        seed=args.seed,
-    )
+    stage = "preflight"
+    oom_count = 0
+    nan_inf_count = 0
+    try:
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is required for executable real SD3-RGDA validation")
+        if not args.dataset_root.exists():
+            raise FileNotFoundError(args.dataset_root)
+        stage = "run_full_real_validation"
+        run_full_real_validation(
+            model_path=args.model_path,
+            smoke_manifest=args.smoke_manifest,
+            micro_manifest=args.micro_manifest,
+            negative_manifest=args.negative_manifest,
+            report_dir=args.report_dir,
+            resolution=args.resolution,
+            dtype=parse_dtype(args.dtype),
+            seed=args.seed,
+        )
+    except torch.cuda.OutOfMemoryError as exc:
+        oom_count += 1
+        write_failure_report(args.report_dir, stage, exc, oom_count, nan_inf_count)
+        raise
+    except BaseException as exc:
+        write_failure_report(args.report_dir, stage, exc, oom_count, nan_inf_count)
+        raise
     return 0
 
 

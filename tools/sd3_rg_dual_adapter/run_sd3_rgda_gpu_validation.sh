@@ -16,6 +16,16 @@ export TOKENIZERS_PARALLELISM=false
 
 mkdir -p "${REPORT_DIR}" "${MANIFEST_DIR}"
 
+package_on_exit() {
+  status=$?
+  "${PYTHON}" scripts/package_gpu_validation.py \
+    --report-dir "${REPORT_DIR}" \
+    --archive "${REPORT_DIR}.tar.gz" || true
+  exit "${status}"
+}
+
+trap package_on_exit EXIT
+
 "${PYTHON}" scripts/build_czech_manifest.py --dataset-root "${DATASET_ROOT}" --out-dir "${MANIFEST_DIR}"
 
 if ! nvidia-smi -L | grep -q "NVIDIA GeForce RTX 5090"; then
@@ -34,5 +44,3 @@ fi
   --resolution 512 \
   --dtype bfloat16 \
   --seed 2026
-
-"${PYTHON}" scripts/package_gpu_validation.py --report-dir "${REPORT_DIR}" --archive "${REPORT_DIR}.tar.gz"

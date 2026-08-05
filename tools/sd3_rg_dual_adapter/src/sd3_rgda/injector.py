@@ -35,18 +35,31 @@ class RGDAInjector(nn.Module):
         self.adapter = DualAdapterBlock(DualAdapterConfig(token_dim=token_dim))
         self.timestep_gate = TimestepGate(embed_dim=timestep_embed_dim)
         self.last_residual: torch.Tensor | None = None
+        self.last_normal_residual: torch.Tensor | None = None
+        self.last_defect_residual: torch.Tensor | None = None
 
     def forward(self, h0: torch.Tensor, condition: RGDAConditionBatch) -> torch.Tensor:
-        normal_tokens = self.normal_encoder(condition.pseudo_clean_latents)
-        defect_tokens = self.rg_encoder(condition.rg_maps)
-        token_mask = condition.token_mask
+        base_dtype = h0.dtype
+        h0_fp32 = h0.float()
+        normal_tokens = self.normal_encoder(condition.pseudo_clean_latents.float())
+        defect_tokens = self.rg_encoder(condition.rg_maps.float())
+        token_mask = condition.token_mask.float()
         if token_mask.ndim == 2:
             token_mask = token_mask.unsqueeze(-1)
-        self._assert_token_shapes(h0, normal_tokens, defect_tokens, token_mask)
-        gate_normal, gate_defect = self.timestep_gate(condition.timesteps)
-        injected = self.adapter(h0, normal_tokens, defect_tokens, gate_normal, gate_defect, token_mask)
-        self.last_residual = injected - h0
-        return cast(torch.Tensor, injected)
+        self._assert_token_shapes(h0_fp32, normal_tokens, defect_tokens, token_mask)
+        gate_normal, gate_defect = self.timestep_gate(condition.timesteps.float())
+        normal_residual, defect_residual, total_residual = self.adapter.compute_residuals(
+            normal_tokens,
+            defect_tokens,
+            gate_normal,
+            gate_defect,
+            token_mask,
+        )
+        injected = h0_fp32 + total_residual
+        self.last_normal_residual = normal_residual.detach()
+        self.last_defect_residual = defect_residual.detach()
+        self.last_residual = total_residual.detach()
+        return injected.to(dtype=base_dtype)
 
     @staticmethod
     def _assert_token_shapes(

@@ -20,8 +20,10 @@ def main() -> int:
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required to run VAE and prompt encoders for cache creation")
     pipe = load_sd3_pipeline(args.model_path, torch.bfloat16)
-    cache_manifest_rows(pipe, args.manifest, args.out_dir, args.resolution, torch.bfloat16, args.patch_size)
-    print("REAL_CZECH_CACHE_IMPLEMENTED=PASS")
+    report = cache_manifest_rows(pipe, args.manifest, args.out_dir, args.resolution, torch.bfloat16, args.patch_size)
+    print(f"CACHE_ROWS={report.cache_rows}")
+    print(f"VAE_DEVICE_DURING_ENCODING={report.vae_device_during_encoding}")
+    print(f"TEXT_ENCODER_DEVICE_DURING_ENCODING={report.text_encoder_device_during_encoding}")
     return 0
 
 

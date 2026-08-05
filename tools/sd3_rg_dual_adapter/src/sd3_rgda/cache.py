@@ -27,6 +27,38 @@ class CachedSD3Sample:
     is_negative: bool
 
 
+@dataclass
+class CacheRequest:
+    sample_id: int
+    image_path: str
+    label_path: str
+    boxes: tuple[Box, ...]
+    class_ids: tuple[int, ...]
+    prompt: str
+    target_pixels: torch.Tensor
+    pseudo_clean_pixels: torch.Tensor
+    rg_map: torch.Tensor
+    split: str
+
+
+@dataclass
+class CacheBuildReport:
+    cache_manifest: Path
+    cache_rows: int
+    unique_prompt_count: int
+    vae_device_during_encoding: str
+    text_encoder_device_during_encoding: str
+    all_cache_files_exist: bool
+    all_tensors_finite: bool
+    no_val_test_leakage: bool
+    negative_rg_map_zero: bool
+    negative_token_mask_zero: bool
+    vae_shift_factor: float
+    vae_scaling_factor: float
+    latent_dtype: str
+    latent_shape: tuple[int, ...]
+
+
 CACHE_MANIFEST_FIELDS = [
     "sample_id",
     "image_path",
@@ -36,6 +68,171 @@ CACHE_MANIFEST_FIELDS = [
     "is_negative",
     "split",
 ]
+
+
+def collect_cache_requests(manifest: str | Path, resolution: int) -> list[CacheRequest]:
+    with Path(manifest).open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    requests: list[CacheRequest] = []
+    for index, row in enumerate(rows):
+        if row.get("split") != "train":
+            raise ValueError(f"NO_VAL_TEST_LEAKAGE failed for row {index}: {row.get('split')}")
+        image_path = Path(row["image_path"])
+        label_path = Path(row["label_path"])
+        image = Image.open(image_path)
+        boxes = read_yolo_boxes(label_path, image.size)
+        resized_boxes = _resize_boxes(boxes, image.size, (resolution, resolution))
+        class_ids = tuple(sorted({box.class_id for box in resized_boxes}))
+        prompt = _prompt_for_classes(class_ids)
+        target_pixels = image_to_tensor(image, resolution)
+        pseudo_clean_pixels = image_to_tensor(build_pseudo_clean_image(image, boxes), resolution)
+        rg_map = build_rg_map(resized_boxes, (resolution, resolution))
+        requests.append(
+            CacheRequest(
+                sample_id=index,
+                image_path=str(image_path),
+                label_path=str(label_path),
+                boxes=resized_boxes,
+                class_ids=class_ids,
+                prompt=prompt,
+                target_pixels=target_pixels,
+                pseudo_clean_pixels=pseudo_clean_pixels,
+                rg_map=rg_map,
+                split="train",
+            )
+        )
+    return requests
+
+
+def encode_all_latents(
+    vae: Any,
+    requests: list[CacheRequest],
+    device: torch.device,
+    dtype: torch.dtype,
+) -> tuple[dict[int, tuple[torch.Tensor, torch.Tensor]], str, float, float]:
+    vae.to(device=device, dtype=dtype)
+    vae.eval()
+    actual_device = _module_device(vae)
+    latents: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+    with torch.no_grad():
+        for request in requests:
+            target = encode_latent(vae, request.target_pixels, dtype)
+            clean = encode_latent(vae, request.pseudo_clean_pixels, dtype)
+            latents[request.sample_id] = (target, clean)
+    vae.to("cpu")
+    torch.cuda.empty_cache()
+    config = getattr(vae, "config", object())
+    return (
+        latents,
+        str(actual_device),
+        float(getattr(config, "shift_factor", 0.0)),
+        float(getattr(config, "scaling_factor", 1.0)),
+    )
+
+
+def encode_unique_prompts(
+    pipe: Any,
+    prompts: list[str],
+    device: torch.device,
+    dtype: torch.dtype,
+) -> tuple[dict[str, tuple[torch.Tensor, torch.Tensor]], str]:
+    for name in ("text_encoder", "text_encoder_2", "text_encoder_3"):
+        encoder = getattr(pipe, name)
+        encoder.to(device)
+        encoder.eval()
+    actual_device = _module_device(pipe.text_encoder)
+    embeddings: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+    with torch.no_grad():
+        for prompt in sorted(set(prompts)):
+            embeddings[prompt] = encode_prompt(pipe, prompt, device, dtype)
+    for name in ("text_encoder", "text_encoder_2", "text_encoder_3"):
+        getattr(pipe, name).to("cpu")
+    torch.cuda.empty_cache()
+    return embeddings, str(actual_device)
+
+
+def write_cache_samples(
+    requests: list[CacheRequest],
+    latents: dict[int, tuple[torch.Tensor, torch.Tensor]],
+    prompt_embeddings: dict[str, tuple[torch.Tensor, torch.Tensor]],
+    out_dir: str | Path,
+    patch_size: int,
+) -> tuple[Path, list[CachedSD3Sample]]:
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    cache_manifest = out / "cache_manifest.csv"
+    samples: list[CachedSD3Sample] = []
+    with cache_manifest.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=CACHE_MANIFEST_FIELDS)
+        writer.writeheader()
+        for request in requests:
+            target_latent, pseudo_clean_latent = latents[request.sample_id]
+            prompt_embeds, pooled_prompt_embeds = prompt_embeddings[request.prompt]
+            latent_size = (int(target_latent.shape[-2]), int(target_latent.shape[-1]))
+            rg_map_latent = downsample_rg_map(request.rg_map, latent_size).unsqueeze(0)
+            token_mask = token_region_mask(rg_map_latent.squeeze(0), patch_size)
+            sample = CachedSD3Sample(
+                image_path=request.image_path,
+                label_path=request.label_path,
+                target_latent=target_latent,
+                pseudo_clean_latent=pseudo_clean_latent,
+                prompt_embeds=prompt_embeds,
+                pooled_prompt_embeds=pooled_prompt_embeds,
+                rg_map_latent=rg_map_latent,
+                token_mask=token_mask,
+                class_ids=request.class_ids,
+                is_negative=len(request.class_ids) == 0,
+            )
+            _assert_sample(sample)
+            cache_path = out / f"sample_{request.sample_id:04d}.pt"
+            torch.save(sample.__dict__, cache_path)
+            samples.append(sample)
+            writer.writerow(
+                {
+                    "sample_id": request.sample_id,
+                    "image_path": sample.image_path,
+                    "label_path": sample.label_path,
+                    "cache_path": str(cache_path),
+                    "class_ids": " ".join(str(item) for item in sample.class_ids),
+                    "is_negative": str(sample.is_negative).lower(),
+                    "split": request.split,
+                }
+            )
+    return cache_manifest, samples
+
+
+def cache_manifest_rows(
+    pipe: Any,
+    manifest: str | Path,
+    out_dir: str | Path,
+    resolution: int,
+    dtype: torch.dtype,
+    patch_size: int,
+) -> CacheBuildReport:
+    device = torch.device("cuda")
+    requests = collect_cache_requests(manifest, resolution)
+    latents, vae_device, shift_factor, scaling_factor = encode_all_latents(pipe.vae, requests, device, dtype)
+    prompt_embeddings, text_device = encode_unique_prompts(pipe, [request.prompt for request in requests], device, dtype)
+    cache_manifest, samples = write_cache_samples(requests, latents, prompt_embeddings, out_dir, patch_size)
+    manifest_rows = validate_cache_manifest(cache_manifest, expected_rows=len(requests))
+    negative_samples = [sample for sample in samples if sample.is_negative]
+    first_latent = samples[0].target_latent if samples else torch.empty(0)
+    return CacheBuildReport(
+        cache_manifest=cache_manifest,
+        cache_rows=len(manifest_rows),
+        unique_prompt_count=len(prompt_embeddings),
+        vae_device_during_encoding=vae_device,
+        text_encoder_device_during_encoding=text_device,
+        all_cache_files_exist=all(Path(row["cache_path"]).exists() for row in manifest_rows),
+        all_tensors_finite=all(_sample_tensors_finite(sample) for sample in samples),
+        no_val_test_leakage=all(row["split"] == "train" for row in manifest_rows),
+        negative_rg_map_zero=all(float(sample.rg_map_latent.abs().sum()) == 0.0 for sample in negative_samples),
+        negative_token_mask_zero=all(float(sample.token_mask.abs().sum()) == 0.0 for sample in negative_samples),
+        vae_shift_factor=shift_factor,
+        vae_scaling_factor=scaling_factor,
+        latent_dtype=str(first_latent.dtype),
+        latent_shape=tuple(int(item) for item in first_latent.shape),
+    )
 
 
 def read_yolo_boxes(label_path: str | Path, image_size: tuple[int, int]) -> tuple[Box, ...]:
@@ -75,10 +272,13 @@ def build_pseudo_clean_image(image: Image.Image, boxes: tuple[Box, ...]) -> Imag
 
 
 def encode_latent(vae: Any, image_tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
-    image_tensor = image_tensor.to(device=vae.device, dtype=dtype)
-    encoded = vae.encode(image_tensor).latent_dist.sample()
-    scale = getattr(getattr(vae, "config", object()), "scaling_factor", 1.0)
-    return torch.as_tensor(encoded * scale).detach().cpu()
+    image_tensor = image_tensor.to(device=_module_device(vae), dtype=dtype)
+    latent = vae.encode(image_tensor).latent_dist.sample()
+    config = getattr(vae, "config", object())
+    shift_factor = float(getattr(config, "shift_factor", 0.0))
+    scaling_factor = float(getattr(config, "scaling_factor", 1.0))
+    latent = (latent - shift_factor) * scaling_factor
+    return torch.as_tensor(latent).detach().cpu()
 
 
 def encode_prompt(pipe: Any, prompt: str, device: torch.device, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
@@ -91,70 +291,6 @@ def encode_prompt(pipe: Any, prompt: str, device: torch.device, dtype: torch.dty
         do_classifier_free_guidance=False,
     )
     return prompt_embeds.to(dtype=dtype).detach().cpu(), pooled_prompt_embeds.to(dtype=dtype).detach().cpu()
-
-
-def cache_manifest_rows(
-    pipe: Any,
-    manifest: str | Path,
-    out_dir: str | Path,
-    resolution: int,
-    dtype: torch.dtype,
-    patch_size: int,
-) -> Path:
-    out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    manifest_path = Path(manifest)
-    cache_manifest = out / "cache_manifest.csv"
-    rows = list(csv.DictReader(manifest_path.open("r", encoding="utf-8", newline="")))
-    with cache_manifest.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=CACHE_MANIFEST_FIELDS)
-        writer.writeheader()
-        for index, row in enumerate(rows):
-            if row.get("split") != "train":
-                raise ValueError(f"NO_VAL_TEST_LEAKAGE failed for row {index}: {row.get('split')}")
-            image_path = Path(row["image_path"])
-            label_path = Path(row["label_path"])
-            image = Image.open(image_path)
-            boxes = read_yolo_boxes(label_path, image.size)
-            resized_boxes = _resize_boxes(boxes, image.size, (resolution, resolution))
-            target_tensor = image_to_tensor(image, resolution)
-            clean_tensor = image_to_tensor(build_pseudo_clean_image(image, boxes), resolution)
-            target_latent = encode_latent(pipe.vae, target_tensor, dtype)
-            pseudo_clean_latent = encode_latent(pipe.vae, clean_tensor, dtype)
-            latent_size = (int(target_latent.shape[-2]), int(target_latent.shape[-1]))
-            rg_map = build_rg_map(resized_boxes, (resolution, resolution))
-            rg_map_latent = downsample_rg_map(rg_map, latent_size).unsqueeze(0)
-            token_mask = token_region_mask(rg_map_latent.squeeze(0), patch_size)
-            class_ids = tuple(sorted({box.class_id for box in resized_boxes}))
-            prompt = _prompt_for_classes(class_ids)
-            prompt_embeds, pooled_prompt_embeds = encode_prompt(pipe, prompt, target_latent.device, dtype)
-            sample = CachedSD3Sample(
-                image_path=str(image_path),
-                label_path=str(label_path),
-                target_latent=target_latent,
-                pseudo_clean_latent=pseudo_clean_latent,
-                prompt_embeds=prompt_embeds,
-                pooled_prompt_embeds=pooled_prompt_embeds,
-                rg_map_latent=rg_map_latent,
-                token_mask=token_mask,
-                class_ids=class_ids,
-                is_negative=len(class_ids) == 0,
-            )
-            _assert_sample(sample)
-            cache_path = out / f"sample_{index:04d}.pt"
-            torch.save(sample.__dict__, cache_path)
-            writer.writerow(
-                {
-                    "sample_id": index,
-                    "image_path": sample.image_path,
-                    "label_path": sample.label_path,
-                    "cache_path": str(cache_path),
-                    "class_ids": " ".join(str(item) for item in class_ids),
-                    "is_negative": str(sample.is_negative).lower(),
-                    "split": "train",
-                }
-            )
-    return cache_manifest
 
 
 def load_cached_sample(path: str | Path, device: torch.device, dtype: torch.dtype) -> CachedSD3Sample:
@@ -188,6 +324,15 @@ def validate_cache_manifest(path: str | Path, expected_rows: int | None = None) 
     return rows
 
 
+def _module_device(module: Any) -> torch.device:
+    parameters = getattr(module, "parameters", None)
+    if callable(parameters):
+        first = next(parameters(), None)
+        if first is not None:
+            return torch.device(first.device)
+    return torch.device("cpu")
+
+
 def _resize_boxes(boxes: tuple[Box, ...], source: tuple[int, int], target: tuple[int, int]) -> tuple[Box, ...]:
     src_w, src_h = source
     dst_w, dst_h = target
@@ -210,16 +355,22 @@ def _prompt_for_classes(class_ids: tuple[int, ...]) -> str:
     return "road damage: " + ", ".join(names.get(class_id, f"class {class_id}") for class_id in class_ids)
 
 
+def _sample_tensors_finite(sample: CachedSD3Sample) -> bool:
+    return all(
+        torch.isfinite(tensor).all()
+        for tensor in [
+            sample.target_latent,
+            sample.pseudo_clean_latent,
+            sample.prompt_embeds,
+            sample.pooled_prompt_embeds,
+            sample.rg_map_latent,
+            sample.token_mask,
+        ]
+    )
+
+
 def _assert_sample(sample: CachedSD3Sample) -> None:
-    tensors = [
-        sample.target_latent,
-        sample.pseudo_clean_latent,
-        sample.prompt_embeds,
-        sample.pooled_prompt_embeds,
-        sample.rg_map_latent,
-        sample.token_mask,
-    ]
-    if not all(torch.isfinite(tensor).all() for tensor in tensors):
+    if not _sample_tensors_finite(sample):
         raise ValueError("ALL_TENSORS_FINITE failed")
     if sample.is_negative and (
         float(sample.rg_map_latent.abs().sum()) != 0.0 or float(sample.token_mask.abs().sum()) != 0.0

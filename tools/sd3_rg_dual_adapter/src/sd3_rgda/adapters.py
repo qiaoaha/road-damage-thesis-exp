@@ -73,6 +73,25 @@ class DualAdapterBlock(nn.Module):
             out = out + self._scale(defect, gate_defect)
         return out
 
+    def compute_residuals(
+        self,
+        normal_tokens: torch.Tensor,
+        defect_tokens: torch.Tensor,
+        gate_normal: torch.Tensor | float = 1.0,
+        gate_defect: torch.Tensor | float = 1.0,
+        token_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        normal = torch.zeros_like(normal_tokens)
+        defect = torch.zeros_like(defect_tokens)
+        if self.config.use_normal_adapter:
+            normal = self._scale(self.normal_adapter(normal_tokens), gate_normal)
+        if self.config.use_defect_adapter:
+            defect = self.defect_adapter(defect_tokens)
+            if self.config.use_region_token_mask and token_mask is not None:
+                defect = defect * token_mask
+            defect = self._scale(defect, gate_defect)
+        return normal, defect, normal + defect
+
     @staticmethod
     def _scale(tokens: torch.Tensor, scale: torch.Tensor | float) -> torch.Tensor:
         if isinstance(scale, torch.Tensor):

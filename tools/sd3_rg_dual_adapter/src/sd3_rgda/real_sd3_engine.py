@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import csv
 import hashlib
 import time
@@ -13,6 +14,7 @@ import torch
 from torch import nn
 
 from sd3_rgda.cache import (
+    CacheBuildReport,
     CachedSD3Sample,
     cache_manifest_rows,
     load_cached_sample,
@@ -56,6 +58,15 @@ class FlowBatch:
     target: torch.Tensor
 
 
+@dataclass(frozen=True)
+class TrainingLoopSummary:
+    losses: list[float]
+    parameter_snapshot: dict[str, torch.Tensor]
+    steps_completed: int
+    peak_allocated_mib: float
+    peak_reserved_mib: float
+
+
 def load_sd3_pipeline(model_path: str | Path, dtype: torch.dtype) -> Any:
     from diffusers import StableDiffusion3Pipeline
 
@@ -93,6 +104,41 @@ def prepare_transformer_from_pipeline(pipe: Any) -> tuple[nn.Module, SD3LoadStat
         cuda_allocated_mib=torch.cuda.memory_allocated() / 1024 / 1024,
         cuda_reserved_mib=torch.cuda.memory_reserved() / 1024 / 1024,
     )
+
+
+def hash_module_parameters(module: nn.Module) -> str:
+    digest = hashlib.sha256()
+    for name, parameter in module.named_parameters():
+        tensor = parameter.detach().cpu().contiguous()
+        digest.update(name.encode("utf-8"))
+        digest.update(str(tuple(tensor.shape)).encode("utf-8"))
+        digest.update(str(tensor.dtype).encode("utf-8"))
+        raw_bytes = tensor.view(torch.uint8).numpy().tobytes()
+        digest.update(raw_bytes)
+    return digest.hexdigest()
+
+
+def parameter_grad_norm(parameter: nn.Parameter | torch.Tensor | None) -> float:
+    if parameter is None or parameter.grad is None:
+        return 0.0
+    return float(parameter.grad.detach().float().norm().cpu())
+
+
+def find_first_linear(module: nn.Module) -> nn.Linear:
+    for child in module.modules():
+        if isinstance(child, nn.Linear):
+            return child
+    raise ValueError(f"No Linear layer found in {module.__class__.__name__}")
+
+
+def find_last_linear(module: nn.Module) -> nn.Linear:
+    found: nn.Linear | None = None
+    for child in module.modules():
+        if isinstance(child, nn.Linear):
+            found = child
+    if found is None:
+        raise ValueError(f"No Linear layer found in {module.__class__.__name__}")
+    return found
 
 
 class SD3RGTransformerWrapper(nn.Module):
@@ -172,6 +218,7 @@ class RealSD3RGDATrainer:
         self.forward_count = 0
         self.oom_count = 0
         self.nan_inf_count = 0
+        self.steps_completed = 0
 
     def load_cached_sample(self, cache_path: str | Path) -> CachedSD3Sample:
         return load_cached_sample(cache_path, self.device, self.dtype)
@@ -212,14 +259,21 @@ class RealSD3RGDATrainer:
         return loss
 
     def backward_step(self, batch: FlowBatch) -> dict[str, float]:
+        metrics = self.backward_only(batch)
+        self.optimizer_step()
+        return metrics
+
+    def backward_only(self, batch: FlowBatch) -> dict[str, float]:
         started = time.perf_counter()
         self.optimizer.zero_grad(set_to_none=True)
         try:
             loss = self.forward_loss(batch)
+            if not torch.isfinite(loss):
+                self.nan_inf_count += 1
+                raise FloatingPointError("loss is not finite")
             loss.backward()  # type: ignore[no-untyped-call]
             grad_norm = float(torch.nn.utils.clip_grad_norm_(self.injector.parameters(), 1.0))
             self.assert_base_gradients_none()
-            self.optimizer.step()
         except torch.cuda.OutOfMemoryError:
             self.oom_count += 1
             raise
@@ -230,6 +284,10 @@ class RealSD3RGDATrainer:
             "reserved_mib": torch.cuda.memory_reserved() / 1024 / 1024,
             "step_seconds": time.perf_counter() - started,
         }
+
+    def optimizer_step(self) -> None:
+        self.optimizer.step()
+        self.steps_completed += 1
 
     def gradient_report(self) -> dict[str, float]:
         return {
@@ -245,10 +303,7 @@ class RealSD3RGDATrainer:
         }
 
     def base_parameter_hash(self) -> str:
-        digest = hashlib.sha256()
-        for parameter in self.transformer.parameters():
-            digest.update(parameter.detach().cpu().contiguous().numpy().tobytes())
-        return digest.hexdigest()
+        return hash_module_parameters(self.transformer)
 
     def save_checkpoint(self, path: str | Path, metadata: dict[str, str]) -> None:
         save_adapter_checkpoint(path, self.injector.trainable_modules(), metadata)
@@ -334,31 +389,50 @@ class RealSD3RGDATrainer:
         }
 
     def two_step_gradient_gate(self, batch: FlowBatch) -> dict[str, float]:
-        first = self.backward_step(batch)
-        second = self.backward_step(batch)
-        report = self.gradient_report()
+        first = self.backward_only(batch)
+        first_report = self.detailed_gradient_report("FIRST")
+        self.optimizer_step()
+        second = self.backward_only(batch)
+        second_report = self.detailed_gradient_report("SECOND")
+        self.optimizer_step()
         return {
             "FIRST_LOSS": first["loss"],
             "SECOND_LOSS": second["loss"],
-            "normal_encoder": report["normal_encoder"],
-            "rg_encoder": report["rg_encoder"],
-            "normal_adapter": report["normal_adapter"],
-            "defect_adapter": report["defect_adapter"],
-            "timestep_gate": report["timestep_gate"],
+            **first_report,
+            **second_report,
         }
 
     def negative_mask_gate(self, batch: FlowBatch) -> dict[str, float]:
         metrics = self.backward_step(batch)
         report = self.gradient_report()
-        residual = self.injector.last_residual
+        normal_residual = self.injector.last_normal_residual
+        defect_residual = self.injector.last_defect_residual
+        total_residual = self.injector.last_residual
         return {
             "LOSS": metrics["loss"],
             "TOKEN_MASK_SUM": float(batch.sample.token_mask.abs().sum().cpu()),
             "RG_MAP_SUM": float(batch.sample.rg_map_latent.abs().sum().cpu()),
-            "RGDA_RESIDUAL_MAX_ABS": float(residual.abs().max().cpu()) if residual is not None else float("inf"),
-            "defect_adapter": report["defect_adapter"],
-            "rg_encoder": report["rg_encoder"],
-            "normal_adapter": report["normal_adapter"],
+            "NORMAL_RESIDUAL_MAX_ABS": _max_abs_or_inf(normal_residual),
+            "DEFECT_RESIDUAL_MAX_ABS": _max_abs_or_inf(defect_residual),
+            "TOTAL_RESIDUAL_MAX_ABS": _max_abs_or_inf(total_residual),
+            "DEFECT_ADAPTER_GRAD": report["defect_adapter"],
+            "RG_ENCODER_GRAD": report["rg_encoder"],
+            "NORMAL_ADAPTER_GRAD": report["normal_adapter"],
+        }
+
+    def detailed_gradient_report(self, prefix: str) -> dict[str, float]:
+        normal_final = find_last_linear(self.injector.adapter.normal_adapter)
+        defect_final = find_last_linear(self.injector.adapter.defect_adapter)
+        normal_early = find_first_linear(self.injector.adapter.normal_adapter)
+        defect_early = find_first_linear(self.injector.adapter.defect_adapter)
+        return {
+            f"{prefix}_NORMAL_ADAPTER_FINAL_GRAD": parameter_grad_norm(normal_final.weight),
+            f"{prefix}_DEFECT_ADAPTER_FINAL_GRAD": parameter_grad_norm(defect_final.weight),
+            f"{prefix}_NORMAL_ENCODER_GRAD": _module_grad_norm(self.injector.normal_encoder),
+            f"{prefix}_RG_ENCODER_GRAD": _module_grad_norm(self.injector.rg_encoder),
+            f"{prefix}_NORMAL_ADAPTER_EARLY_GRAD": parameter_grad_norm(normal_early.weight),
+            f"{prefix}_DEFECT_ADAPTER_EARLY_GRAD": parameter_grad_norm(defect_early.weight),
+            f"{prefix}_TIMESTEP_GATE_GRAD": _module_grad_norm(self.injector.timestep_gate),
         }
 
 
@@ -367,10 +441,11 @@ def run_training_loop(
     cache_manifest: str | Path,
     steps: int,
     metrics_csv: str | Path,
-) -> tuple[list[float], dict[str, torch.Tensor]]:
+) -> TrainingLoopSummary:
     rows = validate_cache_manifest(cache_manifest)
     before = {name: parameter.detach().cpu().clone() for name, parameter in trainer.injector.named_parameters()}
     losses: list[float] = []
+    torch.cuda.reset_peak_memory_stats()
     with Path(metrics_csv).open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
             handle,
@@ -391,7 +466,99 @@ def run_training_loop(
             metrics = trainer.backward_step(batch)
             losses.append(metrics["loss"])
             writer.writerow({"step": step + 1, "sample_id": row["sample_id"], **metrics})
-    return losses, before
+    return TrainingLoopSummary(
+        losses=losses,
+        parameter_snapshot=before,
+        steps_completed=len(losses),
+        peak_allocated_mib=torch.cuda.max_memory_allocated() / 1024 / 1024,
+        peak_reserved_mib=torch.cuda.max_memory_reserved() / 1024 / 1024,
+    )
+
+
+def build_fixed_flow_batches(
+    trainer: RealSD3RGDATrainer,
+    cache_manifest: str | Path,
+    base_seed: int,
+) -> list[FlowBatch]:
+    batches: list[FlowBatch] = []
+    rows = validate_cache_manifest(cache_manifest)
+    for index, row in enumerate(rows):
+        with torch.random.fork_rng(devices=[trainer.device]):
+            torch.manual_seed(base_seed + index)
+            batches.append(trainer.build_flow_batch(trainer.load_cached_sample(row["cache_path"])))
+    return batches
+
+
+def run_fixed_batch_training_loop(
+    trainer: RealSD3RGDATrainer,
+    fixed_batches: list[FlowBatch],
+    steps: int,
+    metrics_csv: str | Path,
+) -> TrainingLoopSummary:
+    if not fixed_batches:
+        raise ValueError("fixed_batches must not be empty")
+    before = {name: parameter.detach().cpu().clone() for name, parameter in trainer.injector.named_parameters()}
+    losses: list[float] = []
+    torch.cuda.reset_peak_memory_stats()
+    with Path(metrics_csv).open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["step", "sample_id", "loss", "grad_norm", "allocated_mib", "reserved_mib", "step_seconds"],
+        )
+        writer.writeheader()
+        for step in range(steps):
+            batch = fixed_batches[step % len(fixed_batches)]
+            metrics = trainer.backward_step(batch)
+            losses.append(metrics["loss"])
+            writer.writerow({"step": step + 1, "sample_id": step % len(fixed_batches), **metrics})
+    return TrainingLoopSummary(
+        losses=losses,
+        parameter_snapshot=before,
+        steps_completed=len(losses),
+        peak_allocated_mib=torch.cuda.max_memory_allocated() / 1024 / 1024,
+        peak_reserved_mib=torch.cuda.max_memory_reserved() / 1024 / 1024,
+    )
+
+
+def scheduler_report(scheduler: Any) -> dict[str, object]:
+    config = getattr(scheduler, "config", object())
+    timesteps = scheduler.timesteps
+    sigmas = scheduler.sigmas
+    num_train_timesteps = int(getattr(config, "num_train_timesteps", len(timesteps)))
+    if len(timesteps) < num_train_timesteps or len(sigmas) < num_train_timesteps:
+        raise ValueError("Scheduler timesteps/sigmas shorter than num_train_timesteps")
+    return {
+        "SCHEDULER_CLASS": scheduler.__class__.__name__,
+        "SCHEDULER_CONFIG": str(config),
+        "NUM_TRAIN_TIMESTEPS": num_train_timesteps,
+        "SCHEDULER_SHIFT": getattr(config, "shift", "missing"),
+        "TIMESTEP_COUNT": len(timesteps),
+        "SIGMA_COUNT": len(sigmas),
+    }
+
+
+def write_failure_report(
+    report_dir: str | Path,
+    stage: str,
+    exception: BaseException,
+    oom_count: int,
+    nan_inf_count: int,
+) -> None:
+    allocated = torch.cuda.memory_allocated() / 1024 / 1024 if torch.cuda.is_available() else 0.0
+    reserved = torch.cuda.memory_reserved() / 1024 / 1024 if torch.cuda.is_available() else 0.0
+    lines = [
+        "FINAL_VERDICT=FAIL",
+        f"FAIL_STAGE={stage}",
+        f"FAIL_EXCEPTION_TYPE={exception.__class__.__name__}",
+        f"FAIL_EXCEPTION_MESSAGE={str(exception)[:500]}",
+        f"OOM_COUNT={oom_count}",
+        f"NAN_INF_COUNT={nan_inf_count}",
+        f"CUDA_ALLOCATED_MIB={allocated:.2f}",
+        f"CUDA_RESERVED_MIB={reserved:.2f}",
+    ]
+    target = Path(report_dir) / "07_FINAL_STATUS.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def run_full_real_validation(
@@ -410,25 +577,29 @@ def run_full_real_validation(
     smoke_cache = cache_manifest_rows(pipe, smoke_manifest, report_dir / "cache_smoke8", resolution, dtype, patch_size=2)
     micro_cache = cache_manifest_rows(pipe, micro_manifest, report_dir / "cache_micro4", resolution, dtype, patch_size=2)
     negative_cache = cache_manifest_rows(pipe, negative_manifest, report_dir / "cache_negative1", resolution, dtype, patch_size=2)
+    scheduler = copy.deepcopy(pipe.scheduler)
     transformer, stats = prepare_transformer_from_pipeline(pipe)
-    from diffusers import FlowMatchEulerDiscreteScheduler
-
-    scheduler = FlowMatchEulerDiscreteScheduler()  # type: ignore[no-untyped-call]
+    scheduler_info = scheduler_report(scheduler)
     token_dim = int(getattr(transformer.config, "caption_projection_dim", 1536))
     latent_channels = int(getattr(transformer.config, "in_channels", 16))
     patch_size = int(getattr(transformer.config, "patch_size", 2))
     trainer = RealSD3RGDATrainer(transformer, scheduler, token_dim, latent_channels, patch_size, dtype)
     base_hash_before = trainer.base_parameter_hash()
-    smoke_rows = validate_cache_manifest(smoke_cache)
+    smoke_rows = validate_cache_manifest(smoke_cache.cache_manifest)
     first_batch = trainer.build_flow_batch(trainer.load_cached_sample(smoke_rows[0]["cache_path"]))
     zero = trainer.zero_init_equivalence(first_batch)
     two_step = trainer.two_step_gradient_gate(first_batch)
-    negative_rows = validate_cache_manifest(negative_cache)
+    negative_rows = validate_cache_manifest(negative_cache.cache_manifest)
     negative_batch = trainer.build_flow_batch(trainer.load_cached_sample(negative_rows[0]["cache_path"]))
     negative = trainer.negative_mask_gate(negative_batch)
     gates: list[GateResult] = [
         GateResult("SD3_FULL_LOAD", True, stats.__dict__),
-        GateResult("REAL_CZECH_CACHE", len(smoke_rows) == 8, {"CACHE_ROWS": len(smoke_rows)}),
+        GateResult(
+            "REAL_CZECH_CACHE",
+            _cache_report_passed(smoke_cache) and _cache_report_passed(micro_cache) and _cache_report_passed(negative_cache),
+            {"CACHE_ROWS": smoke_cache.cache_rows, "UNIQUE_PROMPT_COUNT": smoke_cache.unique_prompt_count},
+        ),
+        GateResult("MODEL_SCHEDULER_PRESERVED", True, scheduler_info),
         GateResult("PATCH_EMBED_INJECTION", True, {"PATCH_MODULE_NAME": stats.patch_module_name}),
         GateResult(
             "ZERO_INIT_EQUIVALENCE",
@@ -437,35 +608,48 @@ def run_full_real_validation(
         ),
         GateResult(
             "TWO_STEP_GRADIENT",
-            all(two_step[name] > 0 for name in ["normal_encoder", "rg_encoder", "normal_adapter", "defect_adapter", "timestep_gate"]),
+            two_step["FIRST_NORMAL_ADAPTER_FINAL_GRAD"] > 0
+            and two_step["FIRST_DEFECT_ADAPTER_FINAL_GRAD"] > 0
+            and two_step["SECOND_NORMAL_ENCODER_GRAD"] > 0
+            and two_step["SECOND_RG_ENCODER_GRAD"] > 0
+            and two_step["SECOND_NORMAL_ADAPTER_EARLY_GRAD"] > 0
+            and two_step["SECOND_DEFECT_ADAPTER_EARLY_GRAD"] > 0
+            and two_step["SECOND_TIMESTEP_GATE_GRAD"] > 0,
             two_step,
         ),
         GateResult(
             "NEGATIVE_MASK_GATE",
             negative["TOKEN_MASK_SUM"] == 0.0
             and negative["RG_MAP_SUM"] == 0.0
-            and negative["defect_adapter"] == 0.0
-            and negative["rg_encoder"] == 0.0
-            and negative["normal_adapter"] > 0,
+            and negative["DEFECT_RESIDUAL_MAX_ABS"] == 0.0
+            and negative["DEFECT_ADAPTER_GRAD"] == 0.0
+            and negative["RG_ENCODER_GRAD"] == 0.0
+            and negative["NORMAL_ADAPTER_GRAD"] > 0,
             negative,
         ),
     ]
-    smoke_losses, smoke_before = run_training_loop(trainer, smoke_cache, 100, report_dir / "smoke100_metrics.csv")
-    smoke_delta = sum(trainer.parameter_delta(smoke_before).values())
+    smoke_summary = run_training_loop(trainer, smoke_cache.cache_manifest, 100, report_dir / "smoke100_metrics.csv")
+    smoke_delta = sum(trainer.parameter_delta(smoke_summary.parameter_snapshot).values())
     gates.append(
         GateResult(
             "SMOKE100",
-            len(smoke_losses) == 100 and smoke_delta > 0,
-            {"STEPS_COMPLETED": len(smoke_losses), "ADAPTER_PARAMETER_DELTA": smoke_delta},
+            smoke_summary.steps_completed == 100 and smoke_delta > 0,
+            {
+                "STEPS_COMPLETED": smoke_summary.steps_completed,
+                "ADAPTER_PARAMETER_DELTA": smoke_delta,
+                "PEAK_ALLOCATED_MIB": smoke_summary.peak_allocated_mib,
+                "PEAK_RESERVED_MIB": smoke_summary.peak_reserved_mib,
+            },
         )
     )
     micro_trainer = RealSD3RGDATrainer(transformer, scheduler, token_dim, latent_channels, patch_size, dtype)
-    micro_losses, _micro_before = run_training_loop(micro_trainer, micro_cache, 500, report_dir / "micro500_metrics.csv")
-    first = torch.median(torch.tensor(micro_losses[:50]))
-    last = torch.median(torch.tensor(micro_losses[-50:]))
+    fixed_batches = build_fixed_flow_batches(micro_trainer, micro_cache.cache_manifest, seed)
+    micro_summary = run_fixed_batch_training_loop(micro_trainer, fixed_batches, 500, report_dir / "micro500_metrics.csv")
+    first = torch.median(torch.tensor(micro_summary.losses[:50]))
+    last = torch.median(torch.tensor(micro_summary.losses[-50:]))
     checkpoint = report_dir / "rgda_checkpoint.pt"
     micro_trainer.save_checkpoint(checkpoint, {"engine": "real_sd3_rgda"})
-    checkpoint_sample = micro_trainer.load_cached_sample(validate_cache_manifest(micro_cache)[0]["cache_path"])
+    checkpoint_sample = micro_trainer.load_cached_sample(validate_cache_manifest(micro_cache.cache_manifest)[0]["cache_path"])
     checkpoint_diff = micro_trainer.compare_outputs(checkpoint, micro_trainer.build_flow_batch(checkpoint_sample))
     base_hash_after = trainer.base_parameter_hash()
     gates.extend(
@@ -474,6 +658,17 @@ def run_full_real_validation(
                 "REAL_SD3_FORWARD",
                 micro_trainer.forward_count >= 500,
                 {"REAL_SD3_FORWARD_COUNT": micro_trainer.forward_count},
+            ),
+            GateResult(
+                "MICRO_FIXED_FLOW_BATCH",
+                len(fixed_batches) == 4,
+                {
+                    "MICRO_FLOW_BATCHES_FIXED": True,
+                    "MICRO_FIXED_BATCH_COUNT": len(fixed_batches),
+                    "MICRO_NOISE_HASHES": [hashlib.sha256(batch.noise.detach().cpu().numpy().tobytes()).hexdigest() for batch in fixed_batches],
+                    "MICRO_TIMESTEPS": [float(batch.timesteps.flatten()[0].detach().cpu()) for batch in fixed_batches],
+                    "MICRO_SIGMAS": [float(batch.sigmas.flatten()[0].detach().cpu()) for batch in fixed_batches],
+                },
             ),
             GateResult(
                 "MICRO_OVERFIT500",
@@ -494,6 +689,9 @@ def run_full_real_validation(
     )
     final = summarize_gates(gates, micro_trainer.oom_count + trainer.oom_count, micro_trainer.nan_inf_count + trainer.nan_inf_count)
     write_gate_report(report_dir / "07_FINAL_STATUS.md", gates, final)
+    if not final.passed:
+        failed = [gate.name for gate in gates if not gate.passed]
+        raise RuntimeError("SD3-RGDA validation gates failed: " + ",".join(failed))
 
 
 def _module_grad_norm(module: nn.Module) -> float:
@@ -502,3 +700,19 @@ def _module_grad_norm(module: nn.Module) -> float:
         if parameter.grad is not None:
             total += float(parameter.grad.detach().float().norm().cpu())
     return total
+
+
+def _max_abs_or_inf(tensor: torch.Tensor | None) -> float:
+    return float(tensor.abs().max().cpu()) if tensor is not None else float("inf")
+
+
+def _cache_report_passed(report: CacheBuildReport) -> bool:
+    return (
+        report.all_cache_files_exist
+        and report.all_tensors_finite
+        and report.no_val_test_leakage
+        and report.negative_rg_map_zero
+        and report.negative_token_mask_zero
+        and report.vae_device_during_encoding == "cuda"
+        and report.text_encoder_device_during_encoding == "cuda"
+    )
