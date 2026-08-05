@@ -13,7 +13,8 @@ def sample_noisy_latent(x0: torch.Tensor, noise: torch.Tensor, sigma: torch.Tens
     if x0.shape != noise.shape:
         raise ValueError(f"x0 and noise shapes differ: {x0.shape} vs {noise.shape}")
     sigma = _broadcast_sigma(sigma, x0)
-    return (1.0 - sigma) * x0 + sigma * noise
+    result: torch.Tensor = (1.0 - sigma) * x0 + sigma * noise
+    return result
 
 
 def flow_matching_target(x0: torch.Tensor, noise: torch.Tensor) -> torch.Tensor:
