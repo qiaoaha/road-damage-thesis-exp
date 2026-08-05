@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${ROOT}"
 PYTHON="${PYTHON:-python}"
 MODEL_PATH="${MODEL_PATH:-/root/autodl-tmp/road_damage_exp/models/stable-diffusion-3-medium-diffusers}"
 DATASET_ROOT="${DATASET_ROOT:-/root/autodl-tmp/road_damage_exp/datasets/Czech_YOLO_seed2026}"
@@ -18,7 +19,7 @@ mkdir -p "${REPORT_DIR}" "${MANIFEST_DIR}"
 
 package_on_exit() {
   status=$?
-  "${PYTHON}" scripts/package_gpu_validation.py \
+  "${PYTHON}" "${ROOT}/scripts/package_gpu_validation.py" \
     --report-dir "${REPORT_DIR}" \
     --archive "${REPORT_DIR}.tar.gz" || true
   exit "${status}"
@@ -26,7 +27,7 @@ package_on_exit() {
 
 trap package_on_exit EXIT
 
-"${PYTHON}" scripts/build_czech_manifest.py --dataset-root "${DATASET_ROOT}" --out-dir "${MANIFEST_DIR}"
+"${PYTHON}" "${ROOT}/scripts/build_czech_manifest.py" --dataset-root "${DATASET_ROOT}" --out-dir "${MANIFEST_DIR}"
 
 if ! nvidia-smi -L | grep -q "NVIDIA GeForce RTX 5090"; then
   echo "GPU_ENV=FAIL" > "${REPORT_DIR}/07_FINAL_STATUS.md"
@@ -34,7 +35,7 @@ if ! nvidia-smi -L | grep -q "NVIDIA GeForce RTX 5090"; then
   exit 2
 fi
 
-"${PYTHON}" scripts/run_real_sd3_validation.py \
+"${PYTHON}" "${ROOT}/scripts/run_real_sd3_validation.py" \
   --model-path "${MODEL_PATH}" \
   --dataset-root "${DATASET_ROOT}" \
   --smoke-manifest "${MANIFEST_DIR}/gpu_smoke8.csv" \

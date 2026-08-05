@@ -37,6 +37,8 @@ class RGDAInjector(nn.Module):
         self.last_residual: torch.Tensor | None = None
         self.last_normal_residual: torch.Tensor | None = None
         self.last_defect_residual: torch.Tensor | None = None
+        self.last_input_tokens: torch.Tensor | None = None
+        self.last_output_tokens: torch.Tensor | None = None
 
     def forward(self, h0: torch.Tensor, condition: RGDAConditionBatch) -> torch.Tensor:
         base_dtype = h0.dtype
@@ -56,6 +58,8 @@ class RGDAInjector(nn.Module):
             token_mask,
         )
         injected = h0_fp32 + total_residual
+        self.last_input_tokens = h0_fp32.detach()
+        self.last_output_tokens = injected.detach()
         self.last_normal_residual = normal_residual.detach()
         self.last_defect_residual = defect_residual.detach()
         self.last_residual = total_residual.detach()

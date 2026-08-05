@@ -61,7 +61,10 @@ def sample_sd3_flow_timesteps(
         mode_scale=1.29,
     ).to(device)
     num_train_timesteps = int(getattr(scheduler.config, "num_train_timesteps", 1000))
-    indices = (u * num_train_timesteps).long().clamp(0, num_train_timesteps - 1)
+    available = min(num_train_timesteps, len(scheduler.timesteps), len(scheduler.sigmas))
+    if available <= 0:
+        raise ValueError("Scheduler has no available timesteps/sigmas for sampling")
+    indices = (u * available).long().clamp(0, available - 1)
     timesteps = scheduler.timesteps.to(device)[indices]
     sigmas = scheduler.sigmas.to(device)[indices]
     weighting = compute_loss_weighting_for_sd3(weighting_scheme=weighting_scheme, sigmas=sigmas)
