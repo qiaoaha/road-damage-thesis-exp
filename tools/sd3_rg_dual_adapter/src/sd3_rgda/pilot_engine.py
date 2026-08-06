@@ -21,6 +21,7 @@ from sd3_rgda.checkpoint import EXPECTED_ADAPTER_MODULES, FORBIDDEN_BASE_PREFIXE
 from sd3_rgda.real_sd3_engine import (
     FlowTrainingConfig,
     RealSD3RGDATrainer,
+    hash_module_parameters,
     load_sd3_pipeline,
     prepare_training_scheduler,
     prepare_transformer_from_pipeline,
@@ -94,6 +95,23 @@ class PilotRunResult:
     sample_usage_counts: dict[int, int]
     next_position: int
     checkpoint_path: Path
+
+
+@dataclass
+class BranchGradientCounts:
+    positive_normal_adapter_grad_nonzero_steps: int = 0
+    positive_defect_adapter_grad_nonzero_steps: int = 0
+    positive_rg_encoder_grad_nonzero_steps: int = 0
+    negative_normal_adapter_grad_nonzero_steps: int = 0
+    negative_defect_adapter_grad_nonzero_steps: int = 0
+    negative_rg_encoder_grad_nonzero_steps: int = 0
+
+    def update(self, is_negative: bool, gradients: Mapping[str, float], eps: float = 1e-12) -> None:
+        prefix = "negative" if is_negative else "positive"
+        for name in ("normal_adapter", "defect_adapter", "rg_encoder"):
+            if abs(float(gradients.get(name, 0.0))) > eps:
+                attr = f"{prefix}_{name}_grad_nonzero_steps"
+                setattr(self, attr, int(getattr(self, attr)) + 1)
 
 
 def deterministic_sample_order(rows: list[dict[str, str]], steps: int, seed: int = 2026) -> list[int]:
@@ -203,6 +221,9 @@ class Pilot1000Runner:
         train_cache_manifest: Path,
         eval_cache_manifest: Path,
         report_dir: Path,
+        pilot_manifest_summary: Path | None = None,
+        clean_proxy_audit: Path | None = None,
+        cache_audit: Path | None = None,
         steps: int = 1000,
         seed: int = 2026,
         checkpoint_interval: int = 100,
@@ -212,6 +233,11 @@ class Pilot1000Runner:
         self.train_cache_manifest = train_cache_manifest
         self.eval_cache_manifest = eval_cache_manifest
         self.report_dir = report_dir
+        self.pilot_manifest_summary = pilot_manifest_summary
+        self.clean_proxy_audit = clean_proxy_audit
+        self.cache_audit = cache_audit
+        self._initial_zero_init_evidence: dict[str, float | str] = {}
+        self._initial_adapter_hash = ""
         self.steps = steps
         self.seed = seed
         self.checkpoint_interval = checkpoint_interval
@@ -239,27 +265,60 @@ class Pilot1000Runner:
             torch.bfloat16,
             flow_config=FlowTrainingConfig(precondition_outputs=True),
         )
+        try:
+            return self._run_with_trainer(trainer, train_rows, resume_from)
+        except torch.cuda.OutOfMemoryError as exc:
+            self._write_failure_summary("pilot_train", exc, trainer, 1, trainer.nan_inf_count, None)
+            raise
+        except (FloatingPointError, RuntimeError) as exc:
+            self._write_failure_summary("pilot_train", exc, trainer, trainer.oom_count, trainer.nan_inf_count, None)
+            raise
+
+    def _run_with_trainer(
+        self, trainer: RealSD3RGDATrainer, train_rows: list[dict[str, str]], resume_from: Path | None
+    ) -> PilotRunResult:
         base_hash_before = trainer.base_parameter_hash()
         initial_snapshot = {name: parameter.detach().cpu().clone() for name, parameter in trainer.injector.named_parameters()}
+        initial_adapter_hash = hash_module_parameters(trainer.injector)
+        self._initial_adapter_hash = initial_adapter_hash
         manifest_sha = sha256_path(self.train_cache_manifest)
         order = deterministic_sample_order(train_rows, self.steps, self.seed)
         state = PilotResumeState(0, 0, order, {index: 0 for index in range(len(train_rows))}, [], float("inf"))
+        zero_evidence: dict[str, float | str]
         if resume_from is not None:
             state = self._load_resume(resume_from, trainer, manifest_sha)
+            payload = torch.load(resume_from, map_location="cpu", weights_only=False)
+            zero_evidence = dict(payload.get("initial_zero_init_evidence", {}))
+            initial_adapter_hash = str(payload.get("initial_adapter_hash", initial_adapter_hash))
+            self._initial_zero_init_evidence = dict(zero_evidence)
+            self._initial_adapter_hash = initial_adapter_hash
         eval_batches = build_fixed_eval_batches(trainer, self.eval_cache_manifest, self.seed)
-        self._write_eval_metrics(0, trainer, eval_batches, append=bool(state.losses))
+        if resume_from is None:
+            first_positive = next(row for row in train_rows if row.get("is_negative") != "true")
+            zero_batch = trainer.build_flow_batch(trainer.load_cached_sample(first_positive["cache_path"]))
+            zero_raw = trainer.zero_init_equivalence(zero_batch)
+            zero_evidence = {key: float(value) for key, value in zero_raw.items()}
+            zero_evidence["PILOT_STARTED_FROM_ZERO_INIT"] = "PASS"
+            zero_evidence["INITIAL_ADAPTER_HASH"] = initial_adapter_hash
+            self._initial_zero_init_evidence = dict(zero_evidence)
+            self._write_eval_metrics(0, trainer, eval_batches, append=False)
+        else:
+            self._restore_metric_history(resume_from)
         train_metrics = self.report_dir / "train_metrics.csv"
+        branch_counts = BranchGradientCounts()
         for step in range(state.step + 1, self.steps + 1):
             sample_index = state.sample_order[state.next_position]
             row = train_rows[sample_index]
             sample = trainer.load_cached_sample(row["cache_path"])
             metrics = trainer.backward_step(trainer.build_flow_batch(sample))
             loss = metrics["loss"]
+            gradients = trainer.gradient_report()
+            branch_counts.update(sample.is_negative, gradients)
             state.losses.append(loss)
             state.sample_usage_counts[sample_index] = state.sample_usage_counts.get(sample_index, 0) + 1
             state.next_position += 1
             state.step = step
-            _append_csv(train_metrics, _train_metric_row(step, loss, metrics, trainer.gradient_report()))
+            _append_csv(train_metrics, _train_metric_row(step, loss, metrics, gradients))
             if step % self.eval_interval == 0:
                 eval_loss = self._write_eval_metrics(step, trainer, eval_batches, append=True)
                 if eval_loss < state.best_eval_loss:
@@ -275,7 +334,8 @@ class Pilot1000Runner:
             float((parameter.detach().cpu() - initial_snapshot[name]).abs().sum())
             for name, parameter in trainer.injector.named_parameters()
         )
-        audit = audit_sample_schedule(train_rows, order)
+        usage_audit = audit_actual_sample_usage(train_rows, state.sample_usage_counts)
+        write_sample_usage_csv(self.report_dir / "sample_usage.csv", train_rows, state.sample_usage_counts)
         first100 = statistics.median(state.losses[:100])
         last100 = statistics.median(state.losses[-100:])
         eval_rows = read_csv(self.report_dir / "eval_metrics.csv")
@@ -299,18 +359,37 @@ class Pilot1000Runner:
         gates.update(
             {
                 "SD3_FULL_LOAD": "PASS",
-                "PILOT_MANIFEST": "PASS",
-                "CLEAN_PROXY": "PASS",
-                "REAL_PILOT_CACHE": "PASS",
-                "ZERO_INIT_EQUIVALENCE": "PASS",
+                "PILOT_MANIFEST": audit_pilot_manifest_summary(self.pilot_manifest_summary),
+                "CLEAN_PROXY": audit_clean_proxy_report(self.clean_proxy_audit),
+                "REAL_PILOT_CACHE": audit_cache_report(self.cache_audit),
+                "ZERO_INIT_EQUIVALENCE": _pass(
+                    float(zero_evidence.get("FINAL_OUTPUT_MAX_ABS_DIFF", float("inf"))) <= 1e-3
+                    and float(zero_evidence.get("PATCH_TOKEN_MAX_ABS_DIFF", float("inf"))) <= 1e-6
+                    and float(zero_evidence.get("RGDA_RESIDUAL_MAX_ABS", float("inf"))) <= 1e-6
+                ),
                 "BASE_SD3_FROZEN": "PASS" if base_hash_before == base_hash_after else "FAIL",
-                "ALL_512_SAMPLES_USED": _pass(audit.unique_train_samples_used == 512),
-                "POSITIVE_NEGATIVE_MIX": _pass(audit.train_positive_steps > 0 and audit.train_negative_steps > 0),
+                "ALL_512_SAMPLES_USED": _pass(usage_audit.unique_train_samples_used == 512),
+                "SAMPLE_USE_RANGE": _pass(usage_audit.train_sample_use_min == 1 and usage_audit.train_sample_use_max == 2),
+                "POSITIVE_NEGATIVE_MIX": _pass(usage_audit.train_positive_steps > 0 and usage_audit.train_negative_steps > 0),
+                "DEFECT_BRANCH_ACTIVE_POSITIVE": _pass(
+                    branch_counts.positive_defect_adapter_grad_nonzero_steps > 0
+                    and branch_counts.positive_rg_encoder_grad_nonzero_steps > 0
+                ),
+                "DEFECT_BRANCH_BLOCKED_NEGATIVE": _pass(
+                    branch_counts.negative_defect_adapter_grad_nonzero_steps == 0
+                    and branch_counts.negative_rg_encoder_grad_nonzero_steps == 0
+                ),
+                "NORMAL_BRANCH_ACTIVE": _pass(
+                    branch_counts.positive_normal_adapter_grad_nonzero_steps > 0
+                    and branch_counts.negative_normal_adapter_grad_nonzero_steps > 0
+                ),
                 "EVAL_FIXED_BATCH": _pass(len(eval_batches) == 64),
                 "CHECKPOINT_SAVE": "PASS" if last.exists() else "FAIL",
             }
         )
-        write_gate_status(self.report_dir / "07_PILOT1000_FINAL_STATUS.md", gates)
+        gates.update({key: str(value) for key, value in zero_evidence.items()})
+        final_gates = finalize_gate_report(gates)
+        write_gate_status(self.report_dir / "07_PILOT1000_FINAL_STATUS.md", final_gates)
         _package_report_dir(self.report_dir)
         return PilotRunResult(state.step, state.losses, state.sample_usage_counts, state.next_position, last)
 
@@ -361,6 +440,13 @@ class Pilot1000Runner:
                 "sample_usage_counts": state.sample_usage_counts,
                 "losses": state.losses,
                 "best_eval_loss": state.best_eval_loss,
+                "train_metric_rows": read_csv(self.report_dir / "train_metrics.csv"),
+                "eval_metric_rows": read_csv(self.report_dir / "eval_metrics.csv"),
+                "gradient_metric_rows": read_csv(self.report_dir / "gradient_metrics.csv"),
+                "memory_metric_rows": read_csv(self.report_dir / "memory_metrics.csv"),
+                "initial_eval_metrics": _first_csv_row(self.report_dir / "eval_metrics.csv"),
+                "initial_zero_init_evidence": self._initial_zero_init_evidence,
+                "initial_adapter_hash": self._initial_adapter_hash,
             },
         )
         scope = inspect_pilot_checkpoint_payload(payload)
@@ -393,6 +479,45 @@ class Pilot1000Runner:
             losses=[float(item) for item in payload["losses"]],
             best_eval_loss=float(payload["best_eval_loss"]),
         )
+
+    def _write_failure_summary(
+        self,
+        stage: str,
+        exception: BaseException,
+        trainer: RealSD3RGDATrainer,
+        oom_count: int,
+        nan_inf_count: int,
+        last_checkpoint: Path | None,
+    ) -> None:
+        fields: dict[str, str | int | float] = {
+            "FINAL_VERDICT": "FAIL",
+            "FAIL_STAGE": stage,
+            "FAIL_EXCEPTION_TYPE": exception.__class__.__name__,
+            "FAIL_EXCEPTION_MESSAGE": str(exception)[:500],
+            "TRAIN_STEPS_COMPLETED": trainer.steps_completed,
+            "OOM_COUNT": oom_count,
+            "NAN_INF_COUNT": nan_inf_count,
+            "LAST_CHECKPOINT": str(last_checkpoint or ""),
+            "CUDA_ALLOCATED_MIB": torch.cuda.memory_allocated() / 1024 / 1024 if torch.cuda.is_available() else 0.0,
+            "CUDA_RESERVED_MIB": torch.cuda.memory_reserved() / 1024 / 1024 if torch.cuda.is_available() else 0.0,
+        }
+        write_gate_status(self.report_dir / "08_PILOT1000_FAILURE_SUMMARY.md", fields)
+
+    def _restore_metric_history(self, checkpoint: Path) -> None:
+        payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        mapping = {
+            "train_metrics.csv": "train_metric_rows",
+            "eval_metrics.csv": "eval_metric_rows",
+            "gradient_metrics.csv": "gradient_metric_rows",
+            "memory_metrics.csv": "memory_metric_rows",
+        }
+        for filename, payload_key in mapping.items():
+            path = self.report_dir / filename
+            if path.exists():
+                continue
+            rows = payload.get(payload_key, [])
+            if rows:
+                _write_csv(path, rows)
 
 
 class MockPilotRunner:
@@ -494,8 +619,140 @@ def evaluate_pilot_gates(inputs: PilotGateInputs) -> dict[str, str]:
         "TRAIN_LOSS_IMPROVED": _pass(inputs.median_last100 <= 0.85 * inputs.median_first100),
         "EVAL_LOSS_IMPROVED": _pass(inputs.eval_loss_step1000 <= 0.95 * inputs.eval_loss_step0),
     }
-    gates["FINAL_VERDICT"] = "PASS" if all(value == "PASS" for value in gates.values()) else "FAIL"
     return gates
+
+
+def finalize_gate_report(gates: Mapping[str, str | int | float]) -> dict[str, str | int | float]:
+    final = dict(gates)
+    final.pop("FINAL_VERDICT", None)
+    required = [
+        "SD3_FULL_LOAD",
+        "PILOT_MANIFEST",
+        "CLEAN_PROXY",
+        "REAL_PILOT_CACHE",
+        "ZERO_INIT_EQUIVALENCE",
+        "BASE_SD3_FROZEN",
+        "TRAIN_1000_STEPS",
+        "ALL_512_SAMPLES_USED",
+        "SAMPLE_USE_RANGE",
+        "POSITIVE_NEGATIVE_MIX",
+        "DEFECT_BRANCH_ACTIVE_POSITIVE",
+        "DEFECT_BRANCH_BLOCKED_NEGATIVE",
+        "NORMAL_BRANCH_ACTIVE",
+        "EVAL_FIXED_BATCH",
+        "TRAIN_LOSS_IMPROVED",
+        "EVAL_LOSS_IMPROVED",
+        "CHECKPOINT_SAVE",
+        "CHECKPOINT_RELOAD",
+        "BASE_HASH_UNCHANGED",
+        "OOM_GATE",
+        "NAN_INF_GATE",
+    ]
+    final["FINAL_VERDICT"] = "PASS" if all(final.get(key) == "PASS" for key in required) else "FAIL"
+    return final
+
+
+def audit_pilot_manifest_summary(path: Path | None) -> str:
+    expected: dict[str, object] = {
+        "train_rows": 512,
+        "train_unique_images": 512,
+        "train_positive": 256,
+        "train_negative": 256,
+        "eval_rows": 64,
+        "eval_unique_images": 64,
+        "eval_positive": 32,
+        "eval_negative": 32,
+        "train_eval_overlap": 0,
+        "val_test_leakage": 0,
+        "class_minimum_gate": "PASS",
+    }
+    return _audit_json_expected(path, expected)
+
+
+def audit_clean_proxy_report(path: Path | None) -> str:
+    expected: dict[str, object] = {
+        "PROXY_TOTAL": 576,
+        "PROXY_MISSING": 0,
+        "PROXY_CORRUPT": 0,
+        "PROXY_SHAPE_MISMATCH": 0,
+        "NEGATIVE_PROXY_EXACT_MATCH": "PASS",
+        "POSITIVE_MASK_CHANGED": "PASS",
+        "OUTSIDE_MASK_UNCHANGED": "PASS",
+        "GRAY_RECTANGLE_METHOD_USED": "NO",
+        "SAM_USED": "NO",
+        "CLEAN_PROXY_READY": "PASS",
+    }
+    return _audit_json_expected(path, expected)
+
+
+def audit_cache_report(path: Path | None) -> str:
+    expected: dict[str, object] = {
+        "TRAIN_CACHE_ROWS": 512,
+        "EVAL_CACHE_ROWS": 64,
+        "ALL_CACHE_FILES_EXIST": "PASS",
+        "ALL_TENSORS_FINITE": "PASS",
+        "VAE_PARAMETER_DTYPE": "torch.float32",
+        "VAE_INPUT_DTYPE": "torch.float32",
+        "CACHED_LATENT_DTYPE": "torch.bfloat16",
+        "TEXT_CACHE_DTYPE": "torch.bfloat16",
+        "SOURCE_HASH_VERIFIED": "PASS",
+        "CLEAN_PROXY_HASH_VERIFIED": "PASS",
+        "LABEL_HASH_VERIFIED": "PASS",
+        "NEGATIVE_RG_ZERO": "PASS",
+        "NEGATIVE_TOKEN_MASK_ZERO": "PASS",
+    }
+    return _audit_json_expected(path, expected)
+
+
+def _audit_json_expected(path: Path | None, expected: Mapping[str, object]) -> str:
+    if path is None or not path.exists():
+        return "FAIL"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return "FAIL"
+    for key, value in expected.items():
+        if data.get(key) != value:
+            return "FAIL"
+    return "PASS"
+
+
+def audit_actual_sample_usage(rows: list[dict[str, str]], usage: Mapping[int, int]) -> SampleScheduleAudit:
+    class_counts = {"D00": 0, "D10": 0, "D20": 0, "D40": 0}
+    positive = 0
+    negative = 0
+    for index, row in enumerate(rows):
+        uses = int(usage.get(index, 0))
+        if row.get("is_negative") == "true":
+            negative += uses
+        else:
+            positive += uses
+            anchor = row.get("anchor_class", "")
+            if anchor in class_counts:
+                class_counts[anchor] += uses
+    values = [int(usage.get(index, 0)) for index in range(len(rows))]
+    return SampleScheduleAudit(
+        unique_train_samples_used=sum(value > 0 for value in values),
+        train_sample_use_min=min(values) if values else 0,
+        train_sample_use_max=max(values) if values else 0,
+        train_positive_steps=positive,
+        train_negative_steps=negative,
+        class_step_counts=class_counts,
+    )
+
+
+def write_sample_usage_csv(path: Path, rows: list[dict[str, str]], usage: Mapping[int, int]) -> None:
+    out_rows = [
+        {
+            "sample_index": str(index),
+            "source_sample_id": row.get("source_sample_id", row.get("sample_id", "")),
+            "anchor_class": row.get("anchor_class", ""),
+            "is_negative": row.get("is_negative", ""),
+            "uses": str(int(usage.get(index, 0))),
+        }
+        for index, row in enumerate(rows)
+    ]
+    _write_csv(path, out_rows)
 
 
 def write_gate_status(path: str | Path, fields: Mapping[str, str | int | float]) -> None:
@@ -544,11 +801,15 @@ def sha256_path(path: str | Path) -> str:
 
 
 def read_csv(path: str | Path) -> list[dict[str, str]]:
-    with Path(path).open("r", encoding="utf-8", newline="") as handle:
+    csv_path = Path(path)
+    if not csv_path.exists():
+        return []
+    with csv_path.open("r", encoding="utf-8", newline="") as handle:
         return list(csv.DictReader(handle))
 
 
 def _write_csv(path: Path, rows: list[dict[str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:
         path.write_text("", encoding="utf-8")
         return
@@ -566,6 +827,30 @@ def _append_csv(path: Path, row: dict[str, str], append: bool = True) -> None:
         if not exists:
             writer.writeheader()
         writer.writerow(row)
+
+
+def _first_csv_row(path: Path) -> dict[str, str]:
+    rows = read_csv(path)
+    return rows[0] if rows else {}
+
+
+def _read_zero_init_evidence(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    evidence: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key in {
+            "FINAL_OUTPUT_MAX_ABS_DIFF",
+            "PATCH_TOKEN_MAX_ABS_DIFF",
+            "RGDA_RESIDUAL_MAX_ABS",
+            "PILOT_STARTED_FROM_ZERO_INIT",
+            "INITIAL_ADAPTER_HASH",
+        }:
+            evidence[key] = value
+    return evidence
 
 
 def _train_metric_row(

@@ -6,6 +6,9 @@ cd "${ROOT}"
 PYTHON="${PYTHON:-python}"
 MODEL_PATH="${MODEL_PATH:-/root/autodl-tmp/road_damage_exp/models/stable-diffusion-3-medium-diffusers}"
 CACHE_ROOT="${CACHE_ROOT:-/root/autodl-tmp/road_damage_exp/cache/sd3_rgda_pilot1000}"
+PILOT_MANIFEST_SUMMARY="${PILOT_MANIFEST_SUMMARY:-${ROOT}/manifests/pilot1000/manifest_summary.json}"
+CLEAN_PROXY_AUDIT="${CLEAN_PROXY_AUDIT:-${ROOT}/pilot_assets/clean_proxy/clean_proxy_audit.json}"
+CACHE_AUDIT="${CACHE_AUDIT:-${CACHE_ROOT}/cache_audit.json}"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
 REPORT_DIR="${REPORT_DIR:-/root/autodl-tmp/road_damage_exp/reports/sd3_rgda_pilot1000_${RUN_TS}}"
 
@@ -49,6 +52,9 @@ PY
     --model-path "${MODEL_PATH}" \
     --train-cache-manifest "${CACHE_ROOT}/train512/cache_manifest.csv" \
     --eval-cache-manifest "${CACHE_ROOT}/eval64/cache_manifest.csv" \
+    --pilot-manifest-summary "${PILOT_MANIFEST_SUMMARY}" \
+    --clean-proxy-audit "${CLEAN_PROXY_AUDIT}" \
+    --cache-audit "${CACHE_AUDIT}" \
     --report-dir "${REPORT_DIR}" \
     --steps 1000 \
     --seed 2026 \

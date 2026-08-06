@@ -20,4 +20,4 @@ def test_gate_report_derived_from_metrics() -> None:
         )
     )
     assert fields["TRAIN_1000_STEPS"] == "FAIL"
-    assert fields["FINAL_VERDICT"] == "FAIL"
+    assert "FINAL_VERDICT" not in fields

@@ -12,6 +12,9 @@ def main() -> int:
     parser.add_argument("--model-path", type=Path)
     parser.add_argument("--train-cache-manifest", type=Path)
     parser.add_argument("--eval-cache-manifest", type=Path)
+    parser.add_argument("--pilot-manifest-summary", type=Path)
+    parser.add_argument("--clean-proxy-audit", type=Path)
+    parser.add_argument("--cache-audit", type=Path)
     parser.add_argument("--report-dir", type=Path, required=True)
     parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=2026)
@@ -31,6 +34,9 @@ def main() -> int:
             "--model-path": args.model_path,
             "--train-cache-manifest": args.train_cache_manifest,
             "--eval-cache-manifest": args.eval_cache_manifest,
+            "--pilot-manifest-summary": args.pilot_manifest_summary,
+            "--clean-proxy-audit": args.clean_proxy_audit,
+            "--cache-audit": args.cache_audit,
         }.items()
         if value is None
     ]
@@ -41,6 +47,9 @@ def main() -> int:
         train_cache_manifest=args.train_cache_manifest,
         eval_cache_manifest=args.eval_cache_manifest,
         report_dir=args.report_dir,
+        pilot_manifest_summary=args.pilot_manifest_summary,
+        clean_proxy_audit=args.clean_proxy_audit,
+        cache_audit=args.cache_audit,
         steps=args.steps,
         seed=args.seed,
         checkpoint_interval=args.checkpoint_interval,

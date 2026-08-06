@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,8 +30,11 @@ class CachedSD3Sample:
     sample_id: str = ""
     anchor_class: str = ""
     source_image_sha256: str = ""
+    label_sha256: str = ""
     clean_proxy_sha256: str = ""
     split: str = "train"
+    source_split: str = "train"
+    pilot_split: str = "train"
 
 
 @dataclass
@@ -48,7 +52,10 @@ class CacheRequest:
     source_sample_id: str = ""
     anchor_class: str = ""
     source_image_sha256: str = ""
+    label_sha256: str = ""
     clean_proxy_sha256: str = ""
+    source_split: str = "train"
+    pilot_split: str = "train"
 
 
 @dataclass
@@ -83,7 +90,10 @@ CACHE_MANIFEST_FIELDS = [
     "is_negative",
     "split",
     "source_image_sha256",
+    "label_sha256",
     "clean_proxy_sha256",
+    "source_split",
+    "pilot_split",
 ]
 
 
@@ -129,6 +139,15 @@ def collect_pilot_cache_requests(clean_proxy_manifest: str | Path, resolution: i
         image_path = Path(row["image_path"])
         label_path = Path(row["label_path"])
         clean_proxy_path = Path(row["clean_proxy_path"])
+        actual_source_sha = _sha256_file(image_path)
+        actual_label_sha = _sha256_file(label_path)
+        actual_proxy_sha = _sha256_file(clean_proxy_path)
+        if row.get("image_sha256", "") != actual_source_sha:
+            raise ValueError("SOURCE_IMAGE_SHA256_MISMATCH")
+        if row.get("label_sha256", "") != actual_label_sha:
+            raise ValueError("LABEL_SHA256_MISMATCH")
+        if row.get("clean_proxy_sha256", "") != actual_proxy_sha:
+            raise ValueError("CLEAN_PROXY_SHA256_MISMATCH")
         image = Image.open(image_path)
         clean = Image.open(clean_proxy_path)
         boxes = read_yolo_boxes(label_path, image.size)
@@ -148,8 +167,11 @@ def collect_pilot_cache_requests(clean_proxy_manifest: str | Path, resolution: i
                 split="train",
                 source_sample_id=row.get("sample_id", ""),
                 anchor_class=row.get("anchor_class", ""),
-                source_image_sha256=row.get("image_sha256", ""),
-                clean_proxy_sha256=row.get("clean_proxy_sha256", ""),
+                source_image_sha256=actual_source_sha,
+                label_sha256=actual_label_sha,
+                clean_proxy_sha256=actual_proxy_sha,
+                source_split="train",
+                pilot_split=row.get("split", ""),
             )
         )
     return requests
@@ -245,8 +267,11 @@ def write_cache_samples(
                 sample_id=request.source_sample_id or str(request.sample_id),
                 anchor_class=request.anchor_class,
                 source_image_sha256=request.source_image_sha256,
+                label_sha256=request.label_sha256,
                 clean_proxy_sha256=request.clean_proxy_sha256,
                 split=request.split,
+                source_split=request.source_split,
+                pilot_split=request.pilot_split,
             )
             _assert_sample(sample)
             cache_path = out / f"sample_{request.sample_id:04d}.pt"
@@ -264,7 +289,10 @@ def write_cache_samples(
                     "is_negative": str(sample.is_negative).lower(),
                     "split": request.split,
                     "source_image_sha256": sample.source_image_sha256,
+                    "label_sha256": sample.label_sha256,
                     "clean_proxy_sha256": sample.clean_proxy_sha256,
+                    "source_split": sample.source_split,
+                    "pilot_split": sample.pilot_split,
                 }
             )
     return cache_manifest, samples
@@ -430,9 +458,20 @@ def load_cached_sample(path: str | Path, device: torch.device, dtype: torch.dtyp
         sample_id=sample.sample_id,
         anchor_class=sample.anchor_class,
         source_image_sha256=sample.source_image_sha256,
+        label_sha256=sample.label_sha256,
         clean_proxy_sha256=sample.clean_proxy_sha256,
         split=sample.split,
+        source_split=sample.source_split,
+        pilot_split=sample.pilot_split,
     )
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def validate_cache_manifest(path: str | Path, expected_rows: int | None = None) -> list[dict[str, str]]:

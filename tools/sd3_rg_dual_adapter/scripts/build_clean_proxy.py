@@ -106,13 +106,29 @@ def build_clean_proxy_assets(
         if preview_counts.get(preview_key, 0) < preview_per_class:
             _write_preview(preview_dir / f"{split_name}_{row['sample_id']}_{preview_key}.jpg", original, mask, proxy)
             preview_counts[preview_key] = preview_counts.get(preview_key, 0) + 1
-    if any(value == "FAIL" for value in qa.values()):
-        qa["CLEAN_PROXY_READY"] = "FAIL"
-    if int(qa["PROXY_TOTAL"]) != 576:
-        qa["CLEAN_PROXY_READY"] = "FAIL"
+    qa["CLEAN_PROXY_READY"] = "PASS" if clean_proxy_qa_passed(qa) else "FAIL"
     _write_csv(manifest_path, audit_rows)
     (out_dir / "clean_proxy_audit.json").write_text(json.dumps(qa, indent=2) + "\n", encoding="utf-8")
     return qa
+
+
+def clean_proxy_qa_passed(qa: dict[str, object], expected_total: int = 576) -> bool:
+    integer_gates = {
+        "PROXY_TOTAL": expected_total,
+        "PROXY_MISSING": 0,
+        "PROXY_CORRUPT": 0,
+        "PROXY_SHAPE_MISMATCH": 0,
+    }
+    for key, expected in integer_gates.items():
+        if int(qa.get(key, -1)) != expected:
+            return False
+    return (
+        qa.get("NEGATIVE_PROXY_EXACT_MATCH") == "PASS"
+        and qa.get("POSITIVE_MASK_CHANGED") == "PASS"
+        and qa.get("OUTSIDE_MASK_UNCHANGED") == "PASS"
+        and qa.get("GRAY_RECTANGLE_METHOD_USED") == "NO"
+        and qa.get("SAM_USED") == "NO"
+    )
 
 
 def _write_preview(path: Path, original: Image.Image, mask: Image.Image, proxy: Image.Image) -> None:

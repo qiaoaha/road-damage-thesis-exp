@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 from pathlib import Path
 
 from PIL import Image
 
 from sd3_rgda.cache import collect_pilot_cache_requests
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    digest.update(path.read_bytes())
+    return digest.hexdigest()
 
 
 def test_clean_proxy_manifest_cache_linkage(tmp_path: Path) -> None:
@@ -26,6 +33,7 @@ def test_clean_proxy_manifest_cache_linkage(tmp_path: Path) -> None:
                 "label_path",
                 "clean_proxy_path",
                 "image_sha256",
+                "label_sha256",
                 "clean_proxy_sha256",
                 "anchor_class",
             ],
@@ -38,13 +46,15 @@ def test_clean_proxy_manifest_cache_linkage(tmp_path: Path) -> None:
                 "image_path": str(image),
                 "label_path": str(label),
                 "clean_proxy_path": str(clean),
-                "image_sha256": "source",
-                "clean_proxy_sha256": "proxy",
+                "image_sha256": _sha256(image),
+                "label_sha256": _sha256(label),
+                "clean_proxy_sha256": _sha256(clean),
                 "anchor_class": "D00",
             }
         )
     request = collect_pilot_cache_requests(manifest, 16)[0]
     assert request.source_sample_id == "s0"
     assert request.anchor_class == "D00"
-    assert request.clean_proxy_sha256 == "proxy"
+    assert request.clean_proxy_sha256 == _sha256(clean)
+    assert request.pilot_split == "train"
     assert float(request.pseudo_clean_pixels.mean()) != float(request.target_pixels.mean())

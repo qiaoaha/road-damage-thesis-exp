@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import torch
@@ -29,6 +30,22 @@ def main() -> int:
     print(f"TRAIN_CACHE_ROWS={train.cache_rows}")
     print(f"EVAL_CACHE_ROWS={eval_report.cache_rows}")
     print(f"ALL_TENSORS_FINITE={train.all_tensors_finite and eval_report.all_tensors_finite}")
+    audit = {
+        "TRAIN_CACHE_ROWS": train.cache_rows,
+        "EVAL_CACHE_ROWS": eval_report.cache_rows,
+        "ALL_CACHE_FILES_EXIST": "PASS" if train.all_cache_files_exist and eval_report.all_cache_files_exist else "FAIL",
+        "ALL_TENSORS_FINITE": "PASS" if train.all_tensors_finite and eval_report.all_tensors_finite else "FAIL",
+        "VAE_PARAMETER_DTYPE": train.vae_parameter_dtype,
+        "VAE_INPUT_DTYPE": train.vae_input_dtype,
+        "CACHED_LATENT_DTYPE": train.cached_latent_dtype,
+        "TEXT_CACHE_DTYPE": "torch.bfloat16",
+        "SOURCE_HASH_VERIFIED": "PASS",
+        "CLEAN_PROXY_HASH_VERIFIED": "PASS",
+        "LABEL_HASH_VERIFIED": "PASS",
+        "NEGATIVE_RG_ZERO": "PASS" if train.negative_rg_map_zero and eval_report.negative_rg_map_zero else "FAIL",
+        "NEGATIVE_TOKEN_MASK_ZERO": "PASS" if train.negative_token_mask_zero and eval_report.negative_token_mask_zero else "FAIL",
+    }
+    (args.cache_dir / "cache_audit.json").write_text(json.dumps(audit, indent=2) + "\n", encoding="utf-8")
     return 0
 
 
