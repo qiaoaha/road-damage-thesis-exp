@@ -35,6 +35,7 @@ class CachedSD3Sample:
     split: str = "train"
     source_split: str = "train"
     pilot_split: str = "train"
+    formal_role: str = ""
 
 
 @dataclass
@@ -56,6 +57,7 @@ class CacheRequest:
     clean_proxy_sha256: str = ""
     source_split: str = "train"
     pilot_split: str = "train"
+    formal_role: str = ""
 
 
 @dataclass
@@ -98,6 +100,7 @@ CACHE_MANIFEST_FIELDS = [
     "clean_proxy_sha256",
     "source_split",
     "pilot_split",
+    "formal_role",
 ]
 
 
@@ -176,6 +179,53 @@ def collect_pilot_cache_requests(clean_proxy_manifest: str | Path, resolution: i
                 clean_proxy_sha256=actual_proxy_sha,
                 source_split="train",
                 pilot_split=row.get("split", ""),
+            )
+        )
+    return requests
+
+
+def collect_formal_cache_requests(clean_proxy_manifest: str | Path, resolution: int, role: str) -> list[CacheRequest]:
+    with Path(clean_proxy_manifest).open("r", encoding="utf-8", newline="") as handle:
+        rows = [row for row in csv.DictReader(handle) if row.get("formal_role") == role]
+    requests: list[CacheRequest] = []
+    for index, row in enumerate(rows):
+        image_path = Path(row["image_path"])
+        label_path = Path(row["label_path"])
+        clean_proxy_path = Path(row["clean_proxy_path"])
+        actual_source_sha = _sha256_file(image_path)
+        actual_label_sha = _sha256_file(label_path)
+        actual_proxy_sha = _sha256_file(clean_proxy_path)
+        if row.get("image_sha256", "") != actual_source_sha:
+            raise ValueError("SOURCE_IMAGE_SHA256_MISMATCH")
+        if row.get("label_sha256", "") != actual_label_sha:
+            raise ValueError("LABEL_SHA256_MISMATCH")
+        if row.get("clean_proxy_sha256", "") != actual_proxy_sha:
+            raise ValueError("CLEAN_PROXY_SHA256_MISMATCH")
+        image = Image.open(image_path)
+        clean = Image.open(clean_proxy_path)
+        boxes = read_yolo_boxes(label_path, image.size)
+        resized_boxes = _resize_boxes(boxes, image.size, (resolution, resolution))
+        class_ids = tuple(sorted({box.class_id for box in resized_boxes}))
+        requests.append(
+            CacheRequest(
+                sample_id=index,
+                image_path=str(image_path),
+                label_path=str(label_path),
+                boxes=resized_boxes,
+                class_ids=class_ids,
+                prompt=_prompt_for_classes(class_ids),
+                target_pixels=image_to_tensor(image, resolution),
+                pseudo_clean_pixels=image_to_tensor(clean, resolution),
+                rg_map=build_rg_map(resized_boxes, (resolution, resolution)),
+                split="train",
+                source_sample_id=row.get("sample_id", ""),
+                anchor_class=row.get("anchor_class", ""),
+                source_image_sha256=actual_source_sha,
+                label_sha256=actual_label_sha,
+                clean_proxy_sha256=actual_proxy_sha,
+                source_split=row.get("source_split", ""),
+                pilot_split=row.get("split", ""),
+                formal_role=role,
             )
         )
     return requests
@@ -280,6 +330,7 @@ def write_cache_samples(
                 split=request.split,
                 source_split=request.source_split,
                 pilot_split=request.pilot_split,
+                formal_role=request.formal_role,
             )
             _assert_sample(sample)
             cache_path = out / f"sample_{request.sample_id:04d}.pt"
@@ -301,6 +352,7 @@ def write_cache_samples(
                     "clean_proxy_sha256": sample.clean_proxy_sha256,
                     "source_split": sample.source_split,
                     "pilot_split": sample.pilot_split,
+                    "formal_role": sample.formal_role,
                 }
             )
     return cache_manifest, samples
@@ -376,6 +428,50 @@ def cache_pilot_manifest_rows(
         all_cache_files_exist=all(Path(row["cache_path"]).exists() for row in manifest_rows),
         all_tensors_finite=all(_sample_tensors_finite(sample) for sample in samples),
         no_val_test_leakage=all(row["split"] == "train" for row in manifest_rows),
+        negative_rg_map_zero=all(float(sample.rg_map_latent.abs().sum()) == 0.0 for sample in negative_samples),
+        negative_token_mask_zero=all(float(sample.token_mask.abs().sum()) == 0.0 for sample in negative_samples),
+        vae_shift_factor=shift_factor,
+        vae_scaling_factor=scaling_factor,
+        latent_dtype=str(first_latent.dtype),
+        latent_shape=tuple(int(item) for item in first_latent.shape),
+        vae_parameter_dtype=vae_parameter_dtype,
+        vae_input_dtype=vae_input_dtype,
+        cached_latent_dtype=cached_latent_dtype,
+        text_cache_dtype=text_cache_dtype,
+        source_hash_verified=all(bool(request.source_image_sha256) for request in requests),
+        label_hash_verified=all(bool(request.label_sha256) for request in requests),
+        clean_proxy_hash_verified=all(bool(request.clean_proxy_sha256) for request in requests),
+    )
+
+
+def cache_formal_manifest_rows(
+    pipe: Any,
+    clean_proxy_manifest: str | Path,
+    out_dir: str | Path,
+    resolution: int,
+    dtype: torch.dtype,
+    patch_size: int,
+    role: str,
+) -> CacheBuildReport:
+    device = torch.device("cuda")
+    requests = collect_formal_cache_requests(clean_proxy_manifest, resolution, role)
+    latents, vae_device, shift_factor, scaling_factor, vae_parameter_dtype, vae_input_dtype, cached_latent_dtype = (
+        encode_all_latents(pipe.vae, requests, device, dtype)
+    )
+    prompt_embeddings, text_device, text_cache_dtype = encode_unique_prompts(pipe, [request.prompt for request in requests], device, dtype)
+    cache_manifest, samples = write_cache_samples(requests, latents, prompt_embeddings, out_dir, patch_size)
+    manifest_rows = validate_cache_manifest(cache_manifest, expected_rows=len(requests))
+    negative_samples = [sample for sample in samples if sample.is_negative]
+    first_latent = samples[0].target_latent if samples else torch.empty(0)
+    return CacheBuildReport(
+        cache_manifest=cache_manifest,
+        cache_rows=len(manifest_rows),
+        unique_prompt_count=len(prompt_embeddings),
+        vae_device_during_encoding=vae_device,
+        text_encoder_device_during_encoding=text_device,
+        all_cache_files_exist=all(Path(row["cache_path"]).exists() for row in manifest_rows),
+        all_tensors_finite=all(_sample_tensors_finite(sample) for sample in samples),
+        no_val_test_leakage=all(row["source_split"] in {"train", "val"} for row in manifest_rows),
         negative_rg_map_zero=all(float(sample.rg_map_latent.abs().sum()) == 0.0 for sample in negative_samples),
         negative_token_mask_zero=all(float(sample.token_mask.abs().sum()) == 0.0 for sample in negative_samples),
         vae_shift_factor=shift_factor,
@@ -479,6 +575,7 @@ def load_cached_sample(path: str | Path, device: torch.device, dtype: torch.dtyp
         split=sample.split,
         source_split=sample.source_split,
         pilot_split=sample.pilot_split,
+        formal_role=sample.formal_role,
     )
 
 
