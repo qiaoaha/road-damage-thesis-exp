@@ -8,8 +8,9 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from PIL import Image, ImageDraw
+from PIL import Image
 
+from sd3_rgda.clean_proxy import telea_inpaint_proxy
 from sd3_rgda.conditions import Box, build_rg_map, downsample_rg_map, token_region_mask
 
 
@@ -281,10 +282,12 @@ def image_to_tensor(image: Image.Image, resolution: int) -> torch.Tensor:
 
 
 def build_pseudo_clean_image(image: Image.Image, boxes: tuple[Box, ...]) -> Image.Image:
-    clean = image.convert("RGB").copy()
-    draw = ImageDraw.Draw(clean)
-    for box in boxes:
-        draw.rectangle((box.x1, box.y1, box.x2, box.y2), fill=(127, 127, 127))
+    if not boxes:
+        return image.convert("RGB").copy()
+    filename = getattr(image, "filename", "")
+    if not isinstance(filename, str) or not filename:
+        raise ValueError("Telea clean proxy requires an image with a source filename")
+    clean, _mask = telea_inpaint_proxy(filename, boxes)
     return clean
 
 
