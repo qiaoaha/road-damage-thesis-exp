@@ -60,6 +60,12 @@ class DatasetCandidate:
         return self.box_count == 0
 
 
+@dataclass(frozen=True)
+class SelectedCandidate:
+    candidate: DatasetCandidate
+    anchor_class: int | None
+
+
 def find_split_dirs(dataset_root: Path) -> tuple[Path, Path]:
     train_images = _first_existing(
         dataset_root / "images" / "train",
@@ -110,14 +116,14 @@ def select_pilot_manifests(
     selected_train_pos = _select_positive_quota(positives, {0: 64, 1: 64, 2: 64, 3: 64}, rng)
     if len(selected_train_pos) < train_positive:
         selected_train_pos.extend(_fill_remaining(positives, selected_train_pos, train_positive, rng))
-    selected_train_neg = _sample_unique(negatives, train_negative, rng)
-    used = {item.image_path for item in [*selected_train_pos, *selected_train_neg]}
+    selected_train_neg = [SelectedCandidate(item, None) for item in _sample_unique(negatives, train_negative, rng)]
+    used = {item.candidate.image_path for item in [*selected_train_pos, *selected_train_neg]}
     eval_pool_pos = [item for item in positives if item.image_path not in used]
     eval_pool_neg = [item for item in negatives if item.image_path not in used]
     selected_eval_pos = _select_positive_quota(eval_pool_pos, {0: 8, 1: 8, 2: 8, 3: 8}, rng)
     if len(selected_eval_pos) < eval_positive:
         selected_eval_pos.extend(_fill_remaining(eval_pool_pos, selected_eval_pos, eval_positive, rng))
-    selected_eval_neg = _sample_unique(eval_pool_neg, eval_negative, rng)
+    selected_eval_neg = [SelectedCandidate(item, None) for item in _sample_unique(eval_pool_neg, eval_negative, rng)]
     train = [*selected_train_pos[:train_positive], *selected_train_neg]
     eval_rows = [*selected_eval_pos[:eval_positive], *selected_eval_neg]
     rng.shuffle(train)
@@ -146,7 +152,13 @@ def summarize_manifest_rows(train: list[dict[str, str]], eval_rows: list[dict[st
         eval_negative=sum(row["is_negative"] == "true" for row in eval_rows),
         train_eval_overlap=len(train_images & eval_images),
         val_test_leakage=sum(row["split"] != "train" for row in [*train, *eval_rows]),
-        class_minimum_gate="PASS" if all(train_anchor_counts.get(CLASS_NAMES[i], 0) >= 32 for i in range(4)) else "FAIL",
+        class_minimum_gate=(
+            "PASS"
+            if len(train) == 512
+            and len(eval_rows) == 64
+            and all(train_anchor_counts.get(CLASS_NAMES[i], 0) >= 32 for i in range(4))
+            else "FAIL"
+        ),
         train_anchor_counts=train_anchor_counts,
         eval_anchor_counts=eval_anchor_counts,
     )
@@ -172,8 +184,8 @@ def write_pilot_manifest_outputs(
 
 def _select_positive_quota(
     positives: list[DatasetCandidate], quota: dict[int, int], rng: random.Random
-) -> list[DatasetCandidate]:
-    selected: list[DatasetCandidate] = []
+) -> list[SelectedCandidate]:
+    selected: list[SelectedCandidate] = []
     used: set[Path] = set()
     for class_id, target in quota.items():
         single = [item for item in positives if item.class_ids == (class_id,) and item.image_path not in used]
@@ -185,15 +197,15 @@ def _select_positive_quota(
             raise ValueError(f"{CLASS_NAMES[class_id]} has fewer than 32 unique train images")
         for item in choices[:target]:
             if item.image_path not in used:
-                selected.append(item)
+                selected.append(SelectedCandidate(item, class_id))
                 used.add(item.image_path)
     return selected
 
 
 def _fill_remaining(
-    pool: list[DatasetCandidate], selected: list[DatasetCandidate], target: int, rng: random.Random
-) -> list[DatasetCandidate]:
-    used = {item.image_path for item in selected}
+    pool: list[DatasetCandidate], selected: list[SelectedCandidate], target: int, rng: random.Random
+) -> list[SelectedCandidate]:
+    used = {item.candidate.image_path for item in selected}
     remaining = [item for item in pool if item.image_path not in used]
     rng.shuffle(remaining)
     needed = target - len(selected)
@@ -201,7 +213,7 @@ def _fill_remaining(
         return []
     if len(remaining) < needed:
         raise ValueError("Not enough unique positive samples for Pilot1000 manifest")
-    return remaining[:needed]
+    return [SelectedCandidate(item, _least_represented_class(item, selected)) for item in remaining[:needed]]
 
 
 def _sample_unique(pool: list[DatasetCandidate], count: int, rng: random.Random) -> list[DatasetCandidate]:
@@ -212,8 +224,9 @@ def _sample_unique(pool: list[DatasetCandidate], count: int, rng: random.Random)
     return items[:count]
 
 
-def _row_dict(index: int, item: DatasetCandidate, seed: int, split_name: str) -> dict[str, str]:
-    anchor = "" if item.is_negative else CLASS_NAMES[item.class_ids[0]]
+def _row_dict(index: int, selected: SelectedCandidate, seed: int, split_name: str) -> dict[str, str]:
+    item = selected.candidate
+    anchor = "" if selected.anchor_class is None else CLASS_NAMES[selected.anchor_class]
     return {
         "sample_id": f"{split_name}_{index:04d}",
         "image_path": str(item.image_path),
@@ -227,6 +240,11 @@ def _row_dict(index: int, item: DatasetCandidate, seed: int, split_name: str) ->
         "label_sha256": _sha256_or_empty(item.label_path),
         "selection_seed": str(seed),
     }
+
+
+def _least_represented_class(item: DatasetCandidate, selected: list[SelectedCandidate]) -> int:
+    counts = Counter(entry.anchor_class for entry in selected if entry.anchor_class is not None)
+    return min(item.class_ids, key=lambda class_id: (counts[class_id], class_id))
 
 
 def _anchor_counts(rows: list[dict[str, str]]) -> dict[str, int]:

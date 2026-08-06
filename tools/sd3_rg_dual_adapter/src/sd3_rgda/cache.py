@@ -26,6 +26,11 @@ class CachedSD3Sample:
     token_mask: torch.Tensor
     class_ids: tuple[int, ...]
     is_negative: bool
+    sample_id: str = ""
+    anchor_class: str = ""
+    source_image_sha256: str = ""
+    clean_proxy_sha256: str = ""
+    split: str = "train"
 
 
 @dataclass
@@ -40,6 +45,10 @@ class CacheRequest:
     pseudo_clean_pixels: torch.Tensor
     rg_map: torch.Tensor
     split: str
+    source_sample_id: str = ""
+    anchor_class: str = ""
+    source_image_sha256: str = ""
+    clean_proxy_sha256: str = ""
 
 
 @dataclass
@@ -65,12 +74,16 @@ class CacheBuildReport:
 
 CACHE_MANIFEST_FIELDS = [
     "sample_id",
+    "source_sample_id",
     "image_path",
     "label_path",
     "cache_path",
     "class_ids",
+    "anchor_class",
     "is_negative",
     "split",
+    "source_image_sha256",
+    "clean_proxy_sha256",
 ]
 
 
@@ -103,6 +116,40 @@ def collect_cache_requests(manifest: str | Path, resolution: int) -> list[CacheR
                 pseudo_clean_pixels=pseudo_clean_pixels,
                 rg_map=rg_map,
                 split="train",
+            )
+        )
+    return requests
+
+
+def collect_pilot_cache_requests(clean_proxy_manifest: str | Path, resolution: int) -> list[CacheRequest]:
+    with Path(clean_proxy_manifest).open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    requests: list[CacheRequest] = []
+    for index, row in enumerate(rows):
+        image_path = Path(row["image_path"])
+        label_path = Path(row["label_path"])
+        clean_proxy_path = Path(row["clean_proxy_path"])
+        image = Image.open(image_path)
+        clean = Image.open(clean_proxy_path)
+        boxes = read_yolo_boxes(label_path, image.size)
+        resized_boxes = _resize_boxes(boxes, image.size, (resolution, resolution))
+        class_ids = tuple(sorted({box.class_id for box in resized_boxes}))
+        requests.append(
+            CacheRequest(
+                sample_id=index,
+                image_path=str(image_path),
+                label_path=str(label_path),
+                boxes=resized_boxes,
+                class_ids=class_ids,
+                prompt=_prompt_for_classes(class_ids),
+                target_pixels=image_to_tensor(image, resolution),
+                pseudo_clean_pixels=image_to_tensor(clean, resolution),
+                rg_map=build_rg_map(resized_boxes, (resolution, resolution)),
+                split="train",
+                source_sample_id=row.get("sample_id", ""),
+                anchor_class=row.get("anchor_class", ""),
+                source_image_sha256=row.get("image_sha256", ""),
+                clean_proxy_sha256=row.get("clean_proxy_sha256", ""),
             )
         )
     return requests
@@ -195,6 +242,11 @@ def write_cache_samples(
                 token_mask=token_mask,
                 class_ids=request.class_ids,
                 is_negative=len(request.class_ids) == 0,
+                sample_id=request.source_sample_id or str(request.sample_id),
+                anchor_class=request.anchor_class,
+                source_image_sha256=request.source_image_sha256,
+                clean_proxy_sha256=request.clean_proxy_sha256,
+                split=request.split,
             )
             _assert_sample(sample)
             cache_path = out / f"sample_{request.sample_id:04d}.pt"
@@ -203,12 +255,16 @@ def write_cache_samples(
             writer.writerow(
                 {
                     "sample_id": request.sample_id,
+                    "source_sample_id": sample.sample_id,
                     "image_path": sample.image_path,
                     "label_path": sample.label_path,
                     "cache_path": str(cache_path),
                     "class_ids": " ".join(str(item) for item in sample.class_ids),
+                    "anchor_class": sample.anchor_class,
                     "is_negative": str(sample.is_negative).lower(),
                     "split": request.split,
+                    "source_image_sha256": sample.source_image_sha256,
+                    "clean_proxy_sha256": sample.clean_proxy_sha256,
                 }
             )
     return cache_manifest, samples
@@ -224,6 +280,45 @@ def cache_manifest_rows(
 ) -> CacheBuildReport:
     device = torch.device("cuda")
     requests = collect_cache_requests(manifest, resolution)
+    latents, vae_device, shift_factor, scaling_factor, vae_parameter_dtype, vae_input_dtype, cached_latent_dtype = (
+        encode_all_latents(pipe.vae, requests, device, dtype)
+    )
+    prompt_embeddings, text_device = encode_unique_prompts(pipe, [request.prompt for request in requests], device, dtype)
+    cache_manifest, samples = write_cache_samples(requests, latents, prompt_embeddings, out_dir, patch_size)
+    manifest_rows = validate_cache_manifest(cache_manifest, expected_rows=len(requests))
+    negative_samples = [sample for sample in samples if sample.is_negative]
+    first_latent = samples[0].target_latent if samples else torch.empty(0)
+    return CacheBuildReport(
+        cache_manifest=cache_manifest,
+        cache_rows=len(manifest_rows),
+        unique_prompt_count=len(prompt_embeddings),
+        vae_device_during_encoding=vae_device,
+        text_encoder_device_during_encoding=text_device,
+        all_cache_files_exist=all(Path(row["cache_path"]).exists() for row in manifest_rows),
+        all_tensors_finite=all(_sample_tensors_finite(sample) for sample in samples),
+        no_val_test_leakage=all(row["split"] == "train" for row in manifest_rows),
+        negative_rg_map_zero=all(float(sample.rg_map_latent.abs().sum()) == 0.0 for sample in negative_samples),
+        negative_token_mask_zero=all(float(sample.token_mask.abs().sum()) == 0.0 for sample in negative_samples),
+        vae_shift_factor=shift_factor,
+        vae_scaling_factor=scaling_factor,
+        latent_dtype=str(first_latent.dtype),
+        latent_shape=tuple(int(item) for item in first_latent.shape),
+        vae_parameter_dtype=vae_parameter_dtype,
+        vae_input_dtype=vae_input_dtype,
+        cached_latent_dtype=cached_latent_dtype,
+    )
+
+
+def cache_pilot_manifest_rows(
+    pipe: Any,
+    clean_proxy_manifest: str | Path,
+    out_dir: str | Path,
+    resolution: int,
+    dtype: torch.dtype,
+    patch_size: int,
+) -> CacheBuildReport:
+    device = torch.device("cuda")
+    requests = collect_pilot_cache_requests(clean_proxy_manifest, resolution)
     latents, vae_device, shift_factor, scaling_factor, vae_parameter_dtype, vae_input_dtype, cached_latent_dtype = (
         encode_all_latents(pipe.vae, requests, device, dtype)
     )
@@ -332,6 +427,11 @@ def load_cached_sample(path: str | Path, device: torch.device, dtype: torch.dtyp
         token_mask=sample.token_mask.to(device=device, dtype=dtype),
         class_ids=tuple(sample.class_ids),
         is_negative=bool(sample.is_negative),
+        sample_id=sample.sample_id,
+        anchor_class=sample.anchor_class,
+        source_image_sha256=sample.source_image_sha256,
+        clean_proxy_sha256=sample.clean_proxy_sha256,
+        split=sample.split,
     )
 
 

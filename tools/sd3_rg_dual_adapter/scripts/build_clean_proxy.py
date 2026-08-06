@@ -60,11 +60,21 @@ def build_clean_proxy_assets(
         audit = audit_clean_proxy(original, proxy, mask, row["is_negative"] == "true")
         subdir = out_dir / split_name
         subdir.mkdir(parents=True, exist_ok=True)
-        proxy_path = subdir / f"{Path(row['sample_id']).stem}_{image_path.name}"
+        proxy_path = subdir / f"{row['sample_id']}.png"
+        mask_path = subdir / f"{row['sample_id']}_mask.png"
         proxy.save(proxy_path)
+        mask.save(mask_path)
+        try:
+            reloaded_proxy = Image.open(proxy_path).convert("RGB")
+            reloaded_mask = Image.open(mask_path).convert("L")
+        except OSError:
+            qa["PROXY_CORRUPT"] = int(qa["PROXY_CORRUPT"]) + 1
+            reloaded_proxy = proxy
+            reloaded_mask = mask
+        audit = audit_clean_proxy(original, reloaded_proxy, reloaded_mask, row["is_negative"] == "true")
         if not proxy_path.exists():
             qa["PROXY_MISSING"] = int(qa["PROXY_MISSING"]) + 1
-        if proxy.size != original.size:
+        if reloaded_proxy.size != original.size:
             qa["PROXY_SHAPE_MISMATCH"] = int(qa["PROXY_SHAPE_MISMATCH"]) + 1
         if not audit.outside_mask_unchanged:
             qa["OUTSIDE_MASK_UNCHANGED"] = "FAIL"
@@ -80,13 +90,16 @@ def build_clean_proxy_assets(
                 "image_path": row["image_path"],
                 "label_path": row["label_path"],
                 "clean_proxy_path": str(proxy_path),
+                "mask_path": str(mask_path),
                 "image_sha256": row["image_sha256"],
+                "label_sha256": row["label_sha256"],
                 "clean_proxy_sha256": sha256_file(proxy_path),
                 "method": audit.method,
                 "mask_pixels": str(audit.mask_pixels),
                 "outside_mask_unchanged": str(audit.outside_mask_unchanged),
                 "is_negative": row["is_negative"],
                 "anchor_class": row["anchor_class"],
+                "class_ids": row["class_ids"],
             }
         )
         preview_key = "NEG" if row["is_negative"] == "true" else row["anchor_class"]
@@ -94,6 +107,8 @@ def build_clean_proxy_assets(
             _write_preview(preview_dir / f"{split_name}_{row['sample_id']}_{preview_key}.jpg", original, mask, proxy)
             preview_counts[preview_key] = preview_counts.get(preview_key, 0) + 1
     if any(value == "FAIL" for value in qa.values()):
+        qa["CLEAN_PROXY_READY"] = "FAIL"
+    if int(qa["PROXY_TOTAL"]) != 576:
         qa["CLEAN_PROXY_READY"] = "FAIL"
     _write_csv(manifest_path, audit_rows)
     (out_dir / "clean_proxy_audit.json").write_text(json.dumps(qa, indent=2) + "\n", encoding="utf-8")

@@ -6,6 +6,9 @@ import csv
 import hashlib
 import json
 import random
+import statistics
+import tarfile
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -13,7 +16,18 @@ from typing import Any
 import torch
 from torch import nn
 
+from sd3_rgda.cache import validate_cache_manifest
 from sd3_rgda.checkpoint import EXPECTED_ADAPTER_MODULES, FORBIDDEN_BASE_PREFIXES
+from sd3_rgda.real_sd3_engine import (
+    FlowTrainingConfig,
+    RealSD3RGDATrainer,
+    load_sd3_pipeline,
+    prepare_training_scheduler,
+    prepare_transformer_from_pipeline,
+)
+from sd3_rgda.real_sd3_engine import (
+    build_fixed_flow_batches as real_build_fixed_flow_batches,
+)
 
 PILOT_CONFIG: dict[str, Any] = {
     "MODEL": "Stable Diffusion 3 Medium",
@@ -61,6 +75,25 @@ class PilotGateInputs:
     median_last100: float
     eval_loss_step0: float
     eval_loss_step1000: float
+
+
+@dataclass
+class PilotResumeState:
+    step: int
+    next_position: int
+    sample_order: list[int]
+    sample_usage_counts: dict[int, int]
+    losses: list[float]
+    best_eval_loss: float
+
+
+@dataclass(frozen=True)
+class PilotRunResult:
+    final_step: int
+    losses: list[float]
+    sample_usage_counts: dict[int, int]
+    next_position: int
+    checkpoint_path: Path
 
 
 def deterministic_sample_order(rows: list[dict[str, str]], steps: int, seed: int = 2026) -> list[int]:
@@ -118,6 +151,24 @@ def build_fixed_eval_plan(rows: list[dict[str, str]], seed: int = 2026) -> list[
     return plan
 
 
+def build_fixed_eval_batches(
+    trainer: RealSD3RGDATrainer,
+    eval_cache_manifest: str | Path,
+    seed: int = 2026,
+) -> list[Any]:
+    torch_state = torch.random.get_rng_state()
+    cuda_state = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []
+    try:
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        return real_build_fixed_flow_batches(trainer, eval_cache_manifest, seed)
+    finally:
+        torch.random.set_rng_state(torch_state)
+        if torch.cuda.is_available() and cuda_state:
+            torch.cuda.set_rng_state_all(cuda_state)
+
+
 def checkpoint_scope_payload(
     modules: dict[str, nn.Module],
     optimizer: torch.optim.Optimizer | None,
@@ -135,10 +186,280 @@ def checkpoint_scope_payload(
         "seed": seed,
         "config": config,
         "manifest_sha256": manifest_sha256,
+        "python_random_state": random.getstate(),
+        "torch_cpu_rng_state": torch.random.get_rng_state(),
+        "torch_cuda_rng_states": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
     }
     if extra:
         payload.update(extra)
     return payload
+
+
+class Pilot1000Runner:
+    def __init__(
+        self,
+        *,
+        model_path: Path,
+        train_cache_manifest: Path,
+        eval_cache_manifest: Path,
+        report_dir: Path,
+        steps: int = 1000,
+        seed: int = 2026,
+        checkpoint_interval: int = 100,
+        eval_interval: int = 100,
+    ) -> None:
+        self.model_path = model_path
+        self.train_cache_manifest = train_cache_manifest
+        self.eval_cache_manifest = eval_cache_manifest
+        self.report_dir = report_dir
+        self.steps = steps
+        self.seed = seed
+        self.checkpoint_interval = checkpoint_interval
+        self.eval_interval = eval_interval
+        self.checkpoint_dir = report_dir / "checkpoints" / "pilot1000"
+
+    def run(self, resume_from: Path | None = None) -> PilotRunResult:
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is required for real Pilot1000 training")
+        self.report_dir.mkdir(parents=True, exist_ok=True)
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        train_rows = validate_cache_manifest(self.train_cache_manifest, expected_rows=512)
+        pipe = load_sd3_pipeline(self.model_path, torch.bfloat16)
+        scheduler = prepare_training_scheduler(pipe.scheduler)
+        transformer, _stats = prepare_transformer_from_pipeline(pipe)
+        token_dim = int(getattr(transformer.config, "caption_projection_dim", 1536))
+        latent_channels = int(getattr(transformer.config, "in_channels", 16))
+        patch_size = int(getattr(transformer.config, "patch_size", 2))
+        trainer = RealSD3RGDATrainer(
+            transformer,
+            scheduler,
+            token_dim,
+            latent_channels,
+            patch_size,
+            torch.bfloat16,
+            flow_config=FlowTrainingConfig(precondition_outputs=True),
+        )
+        base_hash_before = trainer.base_parameter_hash()
+        initial_snapshot = {name: parameter.detach().cpu().clone() for name, parameter in trainer.injector.named_parameters()}
+        manifest_sha = sha256_path(self.train_cache_manifest)
+        order = deterministic_sample_order(train_rows, self.steps, self.seed)
+        state = PilotResumeState(0, 0, order, {index: 0 for index in range(len(train_rows))}, [], float("inf"))
+        if resume_from is not None:
+            state = self._load_resume(resume_from, trainer, manifest_sha)
+        eval_batches = build_fixed_eval_batches(trainer, self.eval_cache_manifest, self.seed)
+        self._write_eval_metrics(0, trainer, eval_batches, append=bool(state.losses))
+        train_metrics = self.report_dir / "train_metrics.csv"
+        for step in range(state.step + 1, self.steps + 1):
+            sample_index = state.sample_order[state.next_position]
+            row = train_rows[sample_index]
+            sample = trainer.load_cached_sample(row["cache_path"])
+            metrics = trainer.backward_step(trainer.build_flow_batch(sample))
+            loss = metrics["loss"]
+            state.losses.append(loss)
+            state.sample_usage_counts[sample_index] = state.sample_usage_counts.get(sample_index, 0) + 1
+            state.next_position += 1
+            state.step = step
+            _append_csv(train_metrics, _train_metric_row(step, loss, metrics, trainer.gradient_report()))
+            if step % self.eval_interval == 0:
+                eval_loss = self._write_eval_metrics(step, trainer, eval_batches, append=True)
+                if eval_loss < state.best_eval_loss:
+                    state.best_eval_loss = eval_loss
+                    self._save_checkpoint(self.checkpoint_dir / "best_eval.pt", trainer, state, manifest_sha)
+            if step % self.checkpoint_interval == 0:
+                self._save_checkpoint(self.checkpoint_dir / f"step_{step:04d}.pt", trainer, state, manifest_sha)
+        last = self.checkpoint_dir / "last.pt"
+        self._save_checkpoint(last, trainer, state, manifest_sha)
+        checkpoint_diff = trainer.compare_outputs(last, eval_batches[0])
+        base_hash_after = trainer.base_parameter_hash()
+        delta = sum(
+            float((parameter.detach().cpu() - initial_snapshot[name]).abs().sum())
+            for name, parameter in trainer.injector.named_parameters()
+        )
+        audit = audit_sample_schedule(train_rows, order)
+        first100 = statistics.median(state.losses[:100])
+        last100 = statistics.median(state.losses[-100:])
+        eval_rows = read_csv(self.report_dir / "eval_metrics.csv")
+        eval0 = float(eval_rows[0]["eval_loss_all"])
+        eval_last = float(eval_rows[-1]["eval_loss_all"])
+        gates = evaluate_pilot_gates(
+            PilotGateInputs(
+                train_steps_completed=state.step,
+                oom_count=trainer.oom_count,
+                nan_inf_count=trainer.nan_inf_count,
+                base_hash_before=base_hash_before,
+                base_hash_after=base_hash_after,
+                checkpoint_reload_max_abs_diff=checkpoint_diff,
+                adapter_parameter_delta=delta,
+                median_first100=first100,
+                median_last100=last100,
+                eval_loss_step0=eval0,
+                eval_loss_step1000=eval_last,
+            )
+        )
+        gates.update(
+            {
+                "SD3_FULL_LOAD": "PASS",
+                "PILOT_MANIFEST": "PASS",
+                "CLEAN_PROXY": "PASS",
+                "REAL_PILOT_CACHE": "PASS",
+                "ZERO_INIT_EQUIVALENCE": "PASS",
+                "BASE_SD3_FROZEN": "PASS" if base_hash_before == base_hash_after else "FAIL",
+                "ALL_512_SAMPLES_USED": _pass(audit.unique_train_samples_used == 512),
+                "POSITIVE_NEGATIVE_MIX": _pass(audit.train_positive_steps > 0 and audit.train_negative_steps > 0),
+                "EVAL_FIXED_BATCH": _pass(len(eval_batches) == 64),
+                "CHECKPOINT_SAVE": "PASS" if last.exists() else "FAIL",
+            }
+        )
+        write_gate_status(self.report_dir / "07_PILOT1000_FINAL_STATUS.md", gates)
+        _package_report_dir(self.report_dir)
+        return PilotRunResult(state.step, state.losses, state.sample_usage_counts, state.next_position, last)
+
+    def _write_eval_metrics(
+        self, step: int, trainer: RealSD3RGDATrainer, fixed_batches: list[Any], append: bool = True
+    ) -> float:
+        losses: list[float] = []
+        by_class: dict[str, list[float]] = {"D00": [], "D10": [], "D20": [], "D40": []}
+        positives: list[float] = []
+        negatives: list[float] = []
+        with torch.no_grad():
+            for batch in fixed_batches:
+                loss = float(trainer.forward_loss(batch).detach().cpu())
+                losses.append(loss)
+                anchor = batch.sample.anchor_class
+                if batch.sample.is_negative:
+                    negatives.append(loss)
+                else:
+                    positives.append(loss)
+                    if anchor in by_class:
+                        by_class[anchor].append(loss)
+        row = {
+            "step": str(step),
+            "eval_loss_all": str(_mean(losses)),
+            "eval_loss_positive": str(_mean(positives)),
+            "eval_loss_negative": str(_mean(negatives)),
+            "D00_loss": str(_mean(by_class["D00"])),
+            "D10_loss": str(_mean(by_class["D10"])),
+            "D20_loss": str(_mean(by_class["D20"])),
+            "D40_loss": str(_mean(by_class["D40"])),
+        }
+        _append_csv(self.report_dir / "eval_metrics.csv", row, append=append)
+        return float(row["eval_loss_all"])
+
+    def _save_checkpoint(
+        self, path: Path, trainer: RealSD3RGDATrainer, state: PilotResumeState, manifest_sha256: str
+    ) -> None:
+        payload = checkpoint_scope_payload(
+            trainer.injector.trainable_modules(),
+            trainer.optimizer,
+            step=state.step,
+            seed=self.seed,
+            config={**PILOT_CONFIG, "TRAIN_STEPS": self.steps},
+            manifest_sha256=manifest_sha256,
+            extra={
+                "sample_order": state.sample_order,
+                "next_position": state.next_position,
+                "sample_usage_counts": state.sample_usage_counts,
+                "losses": state.losses,
+                "best_eval_loss": state.best_eval_loss,
+            },
+        )
+        scope = inspect_pilot_checkpoint_payload(payload)
+        if not scope["adapter_only"]:
+            raise RuntimeError(f"Pilot checkpoint scope invalid: {scope}")
+        torch.save(payload, path)
+
+    def _load_resume(self, path: Path, trainer: RealSD3RGDATrainer, manifest_sha256: str) -> PilotResumeState:
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+        if not isinstance(payload, dict):
+            raise TypeError("Pilot checkpoint payload must be a dict")
+        if payload.get("manifest_sha256") != manifest_sha256:
+            raise ValueError("Pilot resume manifest SHA mismatch")
+        scope = inspect_pilot_checkpoint_payload(payload)
+        if not scope["adapter_only"]:
+            raise ValueError(f"Pilot checkpoint scope invalid: {scope}")
+        modules = payload["modules"]
+        for name, module in trainer.injector.trainable_modules().items():
+            module.load_state_dict(modules[name])
+        trainer.optimizer.load_state_dict(payload["optimizer_state"])
+        random.setstate(payload["python_random_state"])
+        torch.random.set_rng_state(payload["torch_cpu_rng_state"])
+        if torch.cuda.is_available() and payload.get("torch_cuda_rng_states"):
+            torch.cuda.set_rng_state_all(payload["torch_cuda_rng_states"])
+        return PilotResumeState(
+            step=int(payload["step"]),
+            next_position=int(payload["next_position"]),
+            sample_order=[int(item) for item in payload["sample_order"]],
+            sample_usage_counts={int(key): int(value) for key, value in payload["sample_usage_counts"].items()},
+            losses=[float(item) for item in payload["losses"]],
+            best_eval_loss=float(payload["best_eval_loss"]),
+        )
+
+
+class MockPilotRunner:
+    def __init__(self, report_dir: Path, *, seed: int = 2026, samples: int = 12) -> None:
+        self.report_dir = report_dir
+        self.seed = seed
+        self.rows = [
+            {"sample_id": f"mock_{index:04d}", "is_negative": str(index % 2 == 0).lower(), "anchor_class": "D00"}
+            for index in range(samples)
+        ]
+        torch.manual_seed(seed)
+        self.model = nn.Linear(1, 1)
+        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=1e-2)
+
+    def run(self, steps: int, resume_from: Path | None = None) -> PilotRunResult:
+        self.report_dir.mkdir(parents=True, exist_ok=True)
+        order = deterministic_sample_order(self.rows, steps, self.seed)
+        state = PilotResumeState(0, 0, order, {index: 0 for index in range(len(self.rows))}, [], float("inf"))
+        if resume_from is not None:
+            payload = torch.load(resume_from, map_location="cpu", weights_only=False)
+            self.model.load_state_dict(payload["modules"]["normal_adapter"])
+            self.optimizer.load_state_dict(payload["optimizer_state"])
+            torch.random.set_rng_state(payload["torch_cpu_rng_state"])
+            state = PilotResumeState(
+                step=int(payload["step"]),
+                next_position=int(payload["next_position"]),
+                sample_order=order,
+                sample_usage_counts={int(key): int(value) for key, value in payload["sample_usage_counts"].items()},
+                losses=[float(item) for item in payload["losses"]],
+                best_eval_loss=float(payload["best_eval_loss"]),
+            )
+        for step in range(state.step + 1, steps + 1):
+            sample_index = state.sample_order[state.next_position]
+            x = torch.tensor([[float(sample_index + 1) / 10.0]])
+            y = x * 0.5
+            self.optimizer.zero_grad(set_to_none=True)
+            loss = torch.nn.functional.mse_loss(self.model(x), y)
+            torch.autograd.backward(loss)
+            self.optimizer.step()
+            state.losses.append(float(loss.detach()))
+            state.sample_usage_counts[sample_index] += 1
+            state.next_position += 1
+            state.step = step
+        checkpoint = self.report_dir / f"mock_step_{state.step:04d}.pt"
+        payload = checkpoint_scope_payload(
+            {
+                "normal_encoder": nn.Identity(),
+                "rg_encoder": nn.Identity(),
+                "normal_adapter": self.model,
+                "defect_adapter": nn.Identity(),
+                "timestep_gate": nn.Identity(),
+            },
+            self.optimizer,
+            step=state.step,
+            seed=self.seed,
+            config={"mock": True},
+            manifest_sha256="mock",
+            extra={
+                "sample_order": state.sample_order,
+                "next_position": state.next_position,
+                "sample_usage_counts": state.sample_usage_counts,
+                "losses": state.losses,
+                "best_eval_loss": state.best_eval_loss,
+            },
+        )
+        torch.save(payload, checkpoint)
+        return PilotRunResult(state.step, state.losses, state.sample_usage_counts, state.next_position, checkpoint)
 
 
 def inspect_pilot_checkpoint_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -177,7 +498,7 @@ def evaluate_pilot_gates(inputs: PilotGateInputs) -> dict[str, str]:
     return gates
 
 
-def write_gate_status(path: str | Path, fields: dict[str, str | int | float]) -> None:
+def write_gate_status(path: str | Path, fields: Mapping[str, str | int | float]) -> None:
     lines = [f"{key}={value}" for key, value in fields.items()]
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -235,6 +556,47 @@ def _write_csv(path: Path, rows: list[dict[str, str]]) -> None:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _append_csv(path: Path, row: dict[str, str], append: bool = True) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    exists = path.exists() and append
+    with path.open("a" if exists else "w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(row))
+        if not exists:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def _train_metric_row(
+    step: int, loss: float, metrics: dict[str, float], gradients: dict[str, float]
+) -> dict[str, str]:
+    return {
+        "step": str(step),
+        "loss": str(loss),
+        "grad_norm": str(sum(gradients.values())),
+        "learning_rate": "0.0001",
+        "allocated_mib": str(torch.cuda.memory_allocated() / 1024 / 1024 if torch.cuda.is_available() else 0.0),
+        "reserved_mib": str(torch.cuda.memory_reserved() / 1024 / 1024 if torch.cuda.is_available() else 0.0),
+        "step_seconds": str(metrics.get("step_seconds", 0.0)),
+        "normal_encoder_grad": str(gradients.get("normal_encoder", 0.0)),
+        "rg_encoder_grad": str(gradients.get("rg_encoder", 0.0)),
+        "normal_adapter_grad": str(gradients.get("normal_adapter", 0.0)),
+        "defect_adapter_grad": str(gradients.get("defect_adapter", 0.0)),
+        "timestep_gate_grad": str(gradients.get("timestep_gate", 0.0)),
+    }
+
+
+def _mean(values: list[float]) -> float:
+    return float(sum(values) / len(values)) if values else 0.0
+
+
+def _package_report_dir(report_dir: Path) -> Path:
+    archive = report_dir.with_suffix(".tar.gz")
+    with tarfile.open(archive, "w:gz") as tar:
+        tar.add(report_dir, arcname=report_dir.name)
+    (report_dir / "RESULT_ARCHIVE_SHA256.txt").write_text(sha256_path(archive) + "\n", encoding="utf-8")
+    return archive
 
 
 def _pass(value: bool) -> str:

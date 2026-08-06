@@ -9,4 +9,5 @@ def test_pilot_cache_script_declares_real_cache_contract() -> None:
     assert "Pilot1000 real cache requires CUDA" in text
     assert "train512" in text
     assert "eval64" in text
-    assert "cache_manifest_rows" in text
+    assert "cache_pilot_manifest_rows" in text
+    assert "--clean-proxy-manifest" in text
