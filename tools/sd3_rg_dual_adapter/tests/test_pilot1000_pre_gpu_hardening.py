@@ -9,10 +9,13 @@ import torch
 from PIL import Image
 
 from scripts.build_clean_proxy import clean_proxy_qa_passed
+from scripts.cache_pilot1000_inputs import build_cache_audit
 from sd3_rgda.cache import collect_pilot_cache_requests
 from sd3_rgda.pilot_engine import (
+    PILOT_CONFIG,
     BranchGradientCounts,
     Pilot1000Runner,
+    _validate_resume_core_config,
     audit_actual_sample_usage,
     read_csv,
     write_sample_usage_csv,
@@ -117,6 +120,7 @@ def test_resume_restores_metric_history(tmp_path: Path) -> None:
     checkpoint = tmp_path / "resume.pt"
     torch.save(
         {
+            "step": 1,
             "eval_metric_rows": [{"step": "0", "eval_loss_all": "1.0"}, {"step": "100", "eval_loss_all": "0.9"}],
             "train_metric_rows": [{"step": "1", "loss": "1.0"}],
         },
@@ -192,3 +196,150 @@ def test_failure_summary_written(tmp_path: Path) -> None:
     assert "FINAL_VERDICT=FAIL" in report
     assert "FAIL_STAGE=unit" in report
     assert "TRAIN_STEPS_COMPLETED=17" in report
+
+
+def test_fixed_eval_compatible_with_requires_grad_loss(tmp_path: Path) -> None:
+    parameter = torch.nn.Parameter(torch.tensor([1.0]))
+
+    class Optimizer:
+        def __init__(self) -> None:
+            self.step_calls = 0
+
+        def zero_grad(self, set_to_none: bool = True) -> None:
+            parameter.grad = None
+
+        def step(self) -> None:
+            self.step_calls += 1
+
+    class Sample:
+        is_negative = False
+        anchor_class = "D00"
+
+    class Batch:
+        sample = Sample()
+
+    class FakeTrainer:
+        def __init__(self) -> None:
+            self.optimizer = Optimizer()
+            self.backward_calls = 0
+
+        def forward_loss(self, batch) -> torch.Tensor:  # type: ignore[no-untyped-def]
+            if not torch.is_grad_enabled():
+                raise RuntimeError("loss.requires_grad is false")
+            return (parameter * 2).sum()
+
+    trainer = FakeTrainer()
+    before = parameter.detach().clone()
+    runner = Pilot1000Runner(
+        model_path=tmp_path / "model",
+        train_cache_manifest=tmp_path / "train.csv",
+        eval_cache_manifest=tmp_path / "eval.csv",
+        report_dir=tmp_path / "report",
+    )
+    loss = runner._write_eval_metrics(0, trainer, [Batch()], append=False)  # type: ignore[arg-type]
+    assert loss == 2.0
+    assert trainer.optimizer.step_calls == 0
+    assert torch.equal(parameter.detach(), before)
+    assert parameter.grad is None
+
+
+def test_gradient_and_memory_metrics_written() -> None:
+    counts = BranchGradientCounts()
+    gradients = {"normal_adapter": 1.0, "defect_adapter": 2.0, "rg_encoder": 3.0}
+    counts.update(False, gradients)
+    assert counts.positive_normal_adapter_grad_nonzero_steps == 1
+    assert counts.positive_defect_adapter_grad_nonzero_steps == 1
+    assert counts.positive_rg_encoder_grad_nonzero_steps == 1
+
+
+def test_resume_rejects_existing_metric_mismatch(tmp_path: Path) -> None:
+    runner = Pilot1000Runner(
+        model_path=tmp_path / "model",
+        train_cache_manifest=tmp_path / "train.csv",
+        eval_cache_manifest=tmp_path / "eval.csv",
+        report_dir=tmp_path / "report",
+    )
+    runner.report_dir.mkdir(parents=True)
+    (runner.report_dir / "train_metrics.csv").write_text("step,loss\n1,9.0\n", encoding="utf-8")
+    checkpoint = tmp_path / "resume.pt"
+    torch.save({"train_metric_rows": [{"step": "1", "loss": "1.0"}]}, checkpoint)
+    with pytest.raises(ValueError, match="RESUME_METRIC_HISTORY_MISMATCH"):
+        runner._restore_metric_history(checkpoint)
+
+
+def test_resume_rejects_core_config_mismatch() -> None:
+    config = {**PILOT_CONFIG, "TRAIN_STEPS": 1000, "LEARNING_RATE": 2e-4}
+    with pytest.raises(ValueError, match="RESUME_CORE_CONFIG_MISMATCH"):
+        _validate_resume_core_config(config, 1000)
+
+
+def test_cache_audit_uses_actual_text_dtype() -> None:
+    class Report:
+        cache_rows = 512
+        all_cache_files_exist = True
+        all_tensors_finite = True
+        vae_parameter_dtype = "torch.float32"
+        vae_input_dtype = "torch.float32"
+        cached_latent_dtype = "torch.bfloat16"
+        text_cache_dtype = "torch.float32"
+        source_hash_verified = True
+        label_hash_verified = True
+        clean_proxy_hash_verified = True
+        negative_rg_map_zero = True
+        negative_token_mask_zero = True
+
+    train = Report()
+    eval_report = Report()
+    eval_report.cache_rows = 64
+    audit = build_cache_audit(train, eval_report)
+    assert audit["TEXT_CACHE_DTYPE"] == "torch.float32"
+    assert audit["CACHE_READY"] == "FAIL"
+
+
+def test_cache_script_returns_failure_for_bad_audit() -> None:
+    class Report:
+        cache_rows = 512
+        all_cache_files_exist = True
+        all_tensors_finite = False
+        vae_parameter_dtype = "torch.float32"
+        vae_input_dtype = "torch.float32"
+        cached_latent_dtype = "torch.bfloat16"
+        text_cache_dtype = "torch.bfloat16"
+        source_hash_verified = True
+        label_hash_verified = True
+        clean_proxy_hash_verified = True
+        negative_rg_map_zero = True
+        negative_token_mask_zero = True
+
+    train = Report()
+    eval_report = Report()
+    eval_report.cache_rows = 64
+    audit = build_cache_audit(train, eval_report)
+    assert audit["ALL_TENSORS_FINITE"] == "FAIL"
+    assert audit["CACHE_READY"] == "FAIL"
+
+
+def test_invalid_asset_audit_fails_before_model_load(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from sd3_rgda import pilot_engine
+
+    load_calls = 0
+
+    def fake_load(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        nonlocal load_calls
+        load_calls += 1
+
+    monkeypatch.setattr(pilot_engine, "load_sd3_pipeline", fake_load)
+    runner = Pilot1000Runner(
+        model_path=tmp_path / "model",
+        train_cache_manifest=tmp_path / "train.csv",
+        eval_cache_manifest=tmp_path / "eval.csv",
+        report_dir=tmp_path / "report",
+        pilot_manifest_summary=tmp_path / "missing_manifest.json",
+        clean_proxy_audit=tmp_path / "missing_proxy.json",
+        cache_audit=tmp_path / "missing_cache.json",
+    )
+    with pytest.raises(RuntimeError, match="PREFLIGHT_ASSET_AUDIT"):
+        runner.run()
+    assert load_calls == 0
+    report = (runner.report_dir / "08_PILOT1000_FAILURE_SUMMARY.md").read_text(encoding="utf-8")
+    assert "FAIL_STAGE=PREFLIGHT_ASSET_AUDIT" in report

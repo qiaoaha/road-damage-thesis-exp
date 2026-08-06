@@ -77,6 +77,10 @@ class CacheBuildReport:
     vae_parameter_dtype: str = "unknown"
     vae_input_dtype: str = "unknown"
     cached_latent_dtype: str = "unknown"
+    text_cache_dtype: str = "unknown"
+    source_hash_verified: bool = False
+    label_hash_verified: bool = False
+    clean_proxy_hash_verified: bool = False
 
 
 CACHE_MANIFEST_FIELDS = [
@@ -217,7 +221,7 @@ def encode_unique_prompts(
     prompts: list[str],
     device: torch.device,
     dtype: torch.dtype,
-) -> tuple[dict[str, tuple[torch.Tensor, torch.Tensor]], str]:
+) -> tuple[dict[str, tuple[torch.Tensor, torch.Tensor]], str, str]:
     for name in ("text_encoder", "text_encoder_2", "text_encoder_3"):
         encoder = getattr(pipe, name)
         encoder.to(device)
@@ -227,10 +231,14 @@ def encode_unique_prompts(
     with torch.no_grad():
         for prompt in sorted(set(prompts)):
             embeddings[prompt] = encode_prompt(pipe, prompt, device, dtype)
+    text_cache_dtype = "unknown"
+    if embeddings:
+        first_prompt, first_pooled = next(iter(embeddings.values()))
+        text_cache_dtype = str(first_prompt.dtype) if first_prompt.dtype == first_pooled.dtype else "mixed"
     for name in ("text_encoder", "text_encoder_2", "text_encoder_3"):
         getattr(pipe, name).to("cpu")
     torch.cuda.empty_cache()
-    return embeddings, str(actual_device)
+    return embeddings, str(actual_device), text_cache_dtype
 
 
 def write_cache_samples(
@@ -311,7 +319,7 @@ def cache_manifest_rows(
     latents, vae_device, shift_factor, scaling_factor, vae_parameter_dtype, vae_input_dtype, cached_latent_dtype = (
         encode_all_latents(pipe.vae, requests, device, dtype)
     )
-    prompt_embeddings, text_device = encode_unique_prompts(pipe, [request.prompt for request in requests], device, dtype)
+    prompt_embeddings, text_device, text_cache_dtype = encode_unique_prompts(pipe, [request.prompt for request in requests], device, dtype)
     cache_manifest, samples = write_cache_samples(requests, latents, prompt_embeddings, out_dir, patch_size)
     manifest_rows = validate_cache_manifest(cache_manifest, expected_rows=len(requests))
     negative_samples = [sample for sample in samples if sample.is_negative]
@@ -334,6 +342,10 @@ def cache_manifest_rows(
         vae_parameter_dtype=vae_parameter_dtype,
         vae_input_dtype=vae_input_dtype,
         cached_latent_dtype=cached_latent_dtype,
+        text_cache_dtype=text_cache_dtype,
+        source_hash_verified=True,
+        label_hash_verified=True,
+        clean_proxy_hash_verified=True,
     )
 
 
@@ -350,7 +362,7 @@ def cache_pilot_manifest_rows(
     latents, vae_device, shift_factor, scaling_factor, vae_parameter_dtype, vae_input_dtype, cached_latent_dtype = (
         encode_all_latents(pipe.vae, requests, device, dtype)
     )
-    prompt_embeddings, text_device = encode_unique_prompts(pipe, [request.prompt for request in requests], device, dtype)
+    prompt_embeddings, text_device, text_cache_dtype = encode_unique_prompts(pipe, [request.prompt for request in requests], device, dtype)
     cache_manifest, samples = write_cache_samples(requests, latents, prompt_embeddings, out_dir, patch_size)
     manifest_rows = validate_cache_manifest(cache_manifest, expected_rows=len(requests))
     negative_samples = [sample for sample in samples if sample.is_negative]
@@ -373,6 +385,10 @@ def cache_pilot_manifest_rows(
         vae_parameter_dtype=vae_parameter_dtype,
         vae_input_dtype=vae_input_dtype,
         cached_latent_dtype=cached_latent_dtype,
+        text_cache_dtype=text_cache_dtype,
+        source_hash_verified=all(bool(request.source_image_sha256) for request in requests),
+        label_hash_verified=all(bool(request.label_sha256) for request in requests),
+        clean_proxy_hash_verified=all(bool(request.clean_proxy_sha256) for request in requests),
     )
 
 

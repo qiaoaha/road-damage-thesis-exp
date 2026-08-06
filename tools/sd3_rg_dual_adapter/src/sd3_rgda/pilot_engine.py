@@ -86,6 +86,7 @@ class PilotResumeState:
     sample_usage_counts: dict[int, int]
     losses: list[float]
     best_eval_loss: float
+    branch_gradient_counts: BranchGradientCounts
 
 
 @dataclass(frozen=True)
@@ -112,6 +113,13 @@ class BranchGradientCounts:
             if abs(float(gradients.get(name, 0.0))) > eps:
                 attr = f"{prefix}_{name}_grad_nonzero_steps"
                 setattr(self, attr, int(getattr(self, attr)) + 1)
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[str, Any] | None) -> BranchGradientCounts:
+        counts = cls()
+        for field in counts.__dataclass_fields__:
+            setattr(counts, field, int((values or {}).get(field, 0)))
+        return counts
 
 
 def deterministic_sample_order(rows: list[dict[str, str]], steps: int, seed: int = 2026) -> list[int]:
@@ -245,10 +253,14 @@ class Pilot1000Runner:
         self.checkpoint_dir = report_dir / "checkpoints" / "pilot1000"
 
     def run(self, resume_from: Path | None = None) -> PilotRunResult:
-        if not torch.cuda.is_available():
-            raise RuntimeError("CUDA is required for real Pilot1000 training")
         self.report_dir.mkdir(parents=True, exist_ok=True)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        preflight = self._preflight_asset_gates()
+        if not all(value == "PASS" for value in preflight.values()):
+            self._write_preflight_failure(preflight)
+            raise RuntimeError("PREFLIGHT_ASSET_AUDIT failed")
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is required for real Pilot1000 training")
         train_rows = validate_cache_manifest(self.train_cache_manifest, expected_rows=512)
         pipe = load_sd3_pipeline(self.model_path, torch.bfloat16)
         scheduler = prepare_training_scheduler(pipe.scheduler)
@@ -283,7 +295,15 @@ class Pilot1000Runner:
         self._initial_adapter_hash = initial_adapter_hash
         manifest_sha = sha256_path(self.train_cache_manifest)
         order = deterministic_sample_order(train_rows, self.steps, self.seed)
-        state = PilotResumeState(0, 0, order, {index: 0 for index in range(len(train_rows))}, [], float("inf"))
+        state = PilotResumeState(
+            0,
+            0,
+            order,
+            {index: 0 for index in range(len(train_rows))},
+            [],
+            float("inf"),
+            BranchGradientCounts(),
+        )
         zero_evidence: dict[str, float | str]
         if resume_from is not None:
             state = self._load_resume(resume_from, trainer, manifest_sha)
@@ -305,7 +325,7 @@ class Pilot1000Runner:
         else:
             self._restore_metric_history(resume_from)
         train_metrics = self.report_dir / "train_metrics.csv"
-        branch_counts = BranchGradientCounts()
+        branch_counts = state.branch_gradient_counts
         for step in range(state.step + 1, self.steps + 1):
             sample_index = state.sample_order[state.next_position]
             row = train_rows[sample_index]
@@ -314,11 +334,17 @@ class Pilot1000Runner:
             loss = metrics["loss"]
             gradients = trainer.gradient_report()
             branch_counts.update(sample.is_negative, gradients)
+            state.branch_gradient_counts = branch_counts
             state.losses.append(loss)
             state.sample_usage_counts[sample_index] = state.sample_usage_counts.get(sample_index, 0) + 1
             state.next_position += 1
             state.step = step
-            _append_csv(train_metrics, _train_metric_row(step, loss, metrics, gradients))
+            _append_csv(train_metrics, _train_metric_row(step, loss, gradients))
+            _append_csv(
+                self.report_dir / "gradient_metrics.csv",
+                _gradient_metric_row(step, row, sample.is_negative, gradients),
+            )
+            _append_csv(self.report_dir / "memory_metrics.csv", _memory_metric_row(step, metrics))
             if step % self.eval_interval == 0:
                 eval_loss = self._write_eval_metrics(step, trainer, eval_batches, append=True)
                 if eval_loss < state.best_eval_loss:
@@ -400,17 +426,16 @@ class Pilot1000Runner:
         by_class: dict[str, list[float]] = {"D00": [], "D10": [], "D20": [], "D40": []}
         positives: list[float] = []
         negatives: list[float] = []
-        with torch.no_grad():
-            for batch in fixed_batches:
-                loss = float(trainer.forward_loss(batch).detach().cpu())
-                losses.append(loss)
-                anchor = batch.sample.anchor_class
-                if batch.sample.is_negative:
-                    negatives.append(loss)
-                else:
-                    positives.append(loss)
-                    if anchor in by_class:
-                        by_class[anchor].append(loss)
+        for batch in fixed_batches:
+            loss = _evaluate_one_batch(trainer, batch)
+            losses.append(loss)
+            anchor = batch.sample.anchor_class
+            if batch.sample.is_negative:
+                negatives.append(loss)
+            else:
+                positives.append(loss)
+                if anchor in by_class:
+                    by_class[anchor].append(loss)
         row = {
             "step": str(step),
             "eval_loss_all": str(_mean(losses)),
@@ -440,6 +465,7 @@ class Pilot1000Runner:
                 "sample_usage_counts": state.sample_usage_counts,
                 "losses": state.losses,
                 "best_eval_loss": state.best_eval_loss,
+                "branch_gradient_counts": asdict(state.branch_gradient_counts),
                 "train_metric_rows": read_csv(self.report_dir / "train_metrics.csv"),
                 "eval_metric_rows": read_csv(self.report_dir / "eval_metrics.csv"),
                 "gradient_metric_rows": read_csv(self.report_dir / "gradient_metrics.csv"),
@@ -460,6 +486,7 @@ class Pilot1000Runner:
             raise TypeError("Pilot checkpoint payload must be a dict")
         if payload.get("manifest_sha256") != manifest_sha256:
             raise ValueError("Pilot resume manifest SHA mismatch")
+        _validate_resume_core_config(payload.get("config", {}), self.steps)
         scope = inspect_pilot_checkpoint_payload(payload)
         if not scope["adapter_only"]:
             raise ValueError(f"Pilot checkpoint scope invalid: {scope}")
@@ -478,6 +505,7 @@ class Pilot1000Runner:
             sample_usage_counts={int(key): int(value) for key, value in payload["sample_usage_counts"].items()},
             losses=[float(item) for item in payload["losses"]],
             best_eval_loss=float(payload["best_eval_loss"]),
+            branch_gradient_counts=BranchGradientCounts.from_mapping(payload.get("branch_gradient_counts")),
         )
 
     def _write_failure_summary(
@@ -503,6 +531,22 @@ class Pilot1000Runner:
         }
         write_gate_status(self.report_dir / "08_PILOT1000_FAILURE_SUMMARY.md", fields)
 
+    def _preflight_asset_gates(self) -> dict[str, str]:
+        return {
+            "PILOT_MANIFEST": audit_pilot_manifest_summary(self.pilot_manifest_summary),
+            "CLEAN_PROXY": audit_clean_proxy_report(self.clean_proxy_audit),
+            "REAL_PILOT_CACHE": audit_cache_report(self.cache_audit),
+        }
+
+    def _write_preflight_failure(self, gates: Mapping[str, str]) -> None:
+        fields: dict[str, str | int | float] = {
+            "FINAL_VERDICT": "FAIL",
+            "FAIL_STAGE": "PREFLIGHT_ASSET_AUDIT",
+            "TRAIN_STEPS_COMPLETED": 0,
+            **dict(gates),
+        }
+        write_gate_status(self.report_dir / "08_PILOT1000_FAILURE_SUMMARY.md", fields)
+
     def _restore_metric_history(self, checkpoint: Path) -> None:
         payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
         mapping = {
@@ -513,11 +557,14 @@ class Pilot1000Runner:
         }
         for filename, payload_key in mapping.items():
             path = self.report_dir / filename
-            if path.exists():
-                continue
             rows = payload.get(payload_key, [])
+            if path.exists():
+                if read_csv(path) != rows:
+                    raise ValueError("RESUME_METRIC_HISTORY_MISMATCH")
+                continue
             if rows:
                 _write_csv(path, rows)
+        _validate_resume_metric_history(payload, self.report_dir)
 
 
 class MockPilotRunner:
@@ -535,7 +582,15 @@ class MockPilotRunner:
     def run(self, steps: int, resume_from: Path | None = None) -> PilotRunResult:
         self.report_dir.mkdir(parents=True, exist_ok=True)
         order = deterministic_sample_order(self.rows, steps, self.seed)
-        state = PilotResumeState(0, 0, order, {index: 0 for index in range(len(self.rows))}, [], float("inf"))
+        state = PilotResumeState(
+            0,
+            0,
+            order,
+            {index: 0 for index in range(len(self.rows))},
+            [],
+            float("inf"),
+            BranchGradientCounts(),
+        )
         if resume_from is not None:
             payload = torch.load(resume_from, map_location="cpu", weights_only=False)
             self.model.load_state_dict(payload["modules"]["normal_adapter"])
@@ -548,6 +603,7 @@ class MockPilotRunner:
                 sample_usage_counts={int(key): int(value) for key, value in payload["sample_usage_counts"].items()},
                 losses=[float(item) for item in payload["losses"]],
                 best_eval_loss=float(payload["best_eval_loss"]),
+                branch_gradient_counts=BranchGradientCounts.from_mapping(payload.get("branch_gradient_counts")),
             )
         for step in range(state.step + 1, steps + 1):
             sample_index = state.sample_order[state.next_position]
@@ -700,6 +756,7 @@ def audit_cache_report(path: Path | None) -> str:
         "LABEL_HASH_VERIFIED": "PASS",
         "NEGATIVE_RG_ZERO": "PASS",
         "NEGATIVE_TOKEN_MASK_ZERO": "PASS",
+        "CACHE_READY": "PASS",
     }
     return _audit_json_expected(path, expected)
 
@@ -753,6 +810,16 @@ def write_sample_usage_csv(path: Path, rows: list[dict[str, str]], usage: Mappin
         for index, row in enumerate(rows)
     ]
     _write_csv(path, out_rows)
+
+
+def _evaluate_one_batch(trainer: RealSD3RGDATrainer, batch: Any) -> float:
+    trainer.optimizer.zero_grad(set_to_none=True)
+    with torch.set_grad_enabled(True):
+        loss = trainer.forward_loss(batch)
+        value = float(loss.detach().cpu())
+    del loss
+    trainer.optimizer.zero_grad(set_to_none=True)
+    return value
 
 
 def write_gate_status(path: str | Path, fields: Mapping[str, str | int | float]) -> None:
@@ -853,22 +920,70 @@ def _read_zero_init_evidence(path: Path) -> dict[str, str]:
     return evidence
 
 
-def _train_metric_row(
-    step: int, loss: float, metrics: dict[str, float], gradients: dict[str, float]
-) -> dict[str, str]:
+def _validate_resume_core_config(config: Mapping[str, Any], steps: int) -> None:
+    expected = {**PILOT_CONFIG, "TRAIN_STEPS": steps}
+    for key in ("SEED", "TRAIN_STEPS", "LEARNING_RATE", "RESOLUTION", "DTYPE", "WEIGHTING_SCHEME", "PRECONDITION_OUTPUTS"):
+        if config.get(key) != expected[key]:
+            raise ValueError("RESUME_CORE_CONFIG_MISMATCH")
+
+
+def _validate_resume_metric_history(payload: Mapping[str, Any], report_dir: Path) -> None:
+    step = int(payload.get("step", 0))
+    train_steps = _csv_steps(read_csv(report_dir / "train_metrics.csv"))
+    eval_steps = _csv_steps(read_csv(report_dir / "eval_metrics.csv"))
+    if train_steps and train_steps[-1] != step:
+        raise ValueError("RESUME_METRIC_HISTORY_MISMATCH")
+    if train_steps and train_steps != list(range(1, step + 1)):
+        raise ValueError("RESUME_METRIC_HISTORY_MISMATCH")
+    if eval_steps.count(0) > 1:
+        raise ValueError("RESUME_METRIC_HISTORY_MISMATCH")
+    if eval_steps and eval_steps[0] != 0:
+        raise ValueError("RESUME_METRIC_HISTORY_MISMATCH")
+    if any(value % 100 != 0 for value in eval_steps):
+        raise ValueError("RESUME_METRIC_HISTORY_MISMATCH")
+
+
+def _csv_steps(rows: list[dict[str, str]]) -> list[int]:
+    return [int(row["step"]) for row in rows if row.get("step", "").strip()]
+
+
+def _train_metric_row(step: int, loss: float, gradients: Mapping[str, float]) -> dict[str, str]:
     return {
         "step": str(step),
         "loss": str(loss),
         "grad_norm": str(sum(gradients.values())),
         "learning_rate": "0.0001",
-        "allocated_mib": str(torch.cuda.memory_allocated() / 1024 / 1024 if torch.cuda.is_available() else 0.0),
-        "reserved_mib": str(torch.cuda.memory_reserved() / 1024 / 1024 if torch.cuda.is_available() else 0.0),
-        "step_seconds": str(metrics.get("step_seconds", 0.0)),
+    }
+
+
+def _gradient_metric_row(
+    step: int, row: Mapping[str, str], is_negative: bool, gradients: Mapping[str, float]
+) -> dict[str, str]:
+    return {
+        "step": str(step),
+        "source_sample_id": row.get("source_sample_id", row.get("sample_id", "")),
+        "is_negative": str(is_negative).lower(),
+        "anchor_class": row.get("anchor_class", ""),
         "normal_encoder_grad": str(gradients.get("normal_encoder", 0.0)),
         "rg_encoder_grad": str(gradients.get("rg_encoder", 0.0)),
         "normal_adapter_grad": str(gradients.get("normal_adapter", 0.0)),
         "defect_adapter_grad": str(gradients.get("defect_adapter", 0.0)),
         "timestep_gate_grad": str(gradients.get("timestep_gate", 0.0)),
+    }
+
+
+def _memory_metric_row(step: int, metrics: Mapping[str, float]) -> dict[str, str]:
+    allocated = torch.cuda.memory_allocated() / 1024 / 1024 if torch.cuda.is_available() else 0.0
+    reserved = torch.cuda.memory_reserved() / 1024 / 1024 if torch.cuda.is_available() else 0.0
+    peak_allocated = torch.cuda.max_memory_allocated() / 1024 / 1024 if torch.cuda.is_available() else 0.0
+    peak_reserved = torch.cuda.max_memory_reserved() / 1024 / 1024 if torch.cuda.is_available() else 0.0
+    return {
+        "step": str(step),
+        "allocated_mib": str(allocated),
+        "reserved_mib": str(reserved),
+        "peak_allocated_mib": str(peak_allocated),
+        "peak_reserved_mib": str(peak_reserved),
+        "step_seconds": str(metrics.get("step_seconds", 0.0)),
     }
 
 

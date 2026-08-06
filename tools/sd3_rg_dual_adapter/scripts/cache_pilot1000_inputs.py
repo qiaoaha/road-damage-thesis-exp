@@ -30,23 +30,44 @@ def main() -> int:
     print(f"TRAIN_CACHE_ROWS={train.cache_rows}")
     print(f"EVAL_CACHE_ROWS={eval_report.cache_rows}")
     print(f"ALL_TENSORS_FINITE={train.all_tensors_finite and eval_report.all_tensors_finite}")
+    audit = build_cache_audit(train, eval_report)
+    (args.cache_dir / "cache_audit.json").write_text(json.dumps(audit, indent=2) + "\n", encoding="utf-8")
+    return 0 if audit["CACHE_READY"] == "PASS" else 2
+
+
+def build_cache_audit(train, eval_report) -> dict[str, object]:
     audit = {
         "TRAIN_CACHE_ROWS": train.cache_rows,
         "EVAL_CACHE_ROWS": eval_report.cache_rows,
         "ALL_CACHE_FILES_EXIST": "PASS" if train.all_cache_files_exist and eval_report.all_cache_files_exist else "FAIL",
         "ALL_TENSORS_FINITE": "PASS" if train.all_tensors_finite and eval_report.all_tensors_finite else "FAIL",
-        "VAE_PARAMETER_DTYPE": train.vae_parameter_dtype,
-        "VAE_INPUT_DTYPE": train.vae_input_dtype,
-        "CACHED_LATENT_DTYPE": train.cached_latent_dtype,
+        "VAE_PARAMETER_DTYPE": train.vae_parameter_dtype if train.vae_parameter_dtype == eval_report.vae_parameter_dtype else "MISMATCH",
+        "VAE_INPUT_DTYPE": train.vae_input_dtype if train.vae_input_dtype == eval_report.vae_input_dtype else "MISMATCH",
+        "CACHED_LATENT_DTYPE": train.cached_latent_dtype if train.cached_latent_dtype == eval_report.cached_latent_dtype else "MISMATCH",
+        "TEXT_CACHE_DTYPE": train.text_cache_dtype if train.text_cache_dtype == eval_report.text_cache_dtype else "MISMATCH",
+        "SOURCE_HASH_VERIFIED": "PASS" if train.source_hash_verified and eval_report.source_hash_verified else "FAIL",
+        "CLEAN_PROXY_HASH_VERIFIED": "PASS" if train.clean_proxy_hash_verified and eval_report.clean_proxy_hash_verified else "FAIL",
+        "LABEL_HASH_VERIFIED": "PASS" if train.label_hash_verified and eval_report.label_hash_verified else "FAIL",
+        "NEGATIVE_RG_ZERO": "PASS" if train.negative_rg_map_zero and eval_report.negative_rg_map_zero else "FAIL",
+        "NEGATIVE_TOKEN_MASK_ZERO": "PASS" if train.negative_token_mask_zero and eval_report.negative_token_mask_zero else "FAIL",
+    }
+    expected = {
+        "TRAIN_CACHE_ROWS": 512,
+        "EVAL_CACHE_ROWS": 64,
+        "ALL_CACHE_FILES_EXIST": "PASS",
+        "ALL_TENSORS_FINITE": "PASS",
+        "VAE_PARAMETER_DTYPE": "torch.float32",
+        "VAE_INPUT_DTYPE": "torch.float32",
+        "CACHED_LATENT_DTYPE": "torch.bfloat16",
         "TEXT_CACHE_DTYPE": "torch.bfloat16",
         "SOURCE_HASH_VERIFIED": "PASS",
         "CLEAN_PROXY_HASH_VERIFIED": "PASS",
         "LABEL_HASH_VERIFIED": "PASS",
-        "NEGATIVE_RG_ZERO": "PASS" if train.negative_rg_map_zero and eval_report.negative_rg_map_zero else "FAIL",
-        "NEGATIVE_TOKEN_MASK_ZERO": "PASS" if train.negative_token_mask_zero and eval_report.negative_token_mask_zero else "FAIL",
+        "NEGATIVE_RG_ZERO": "PASS",
+        "NEGATIVE_TOKEN_MASK_ZERO": "PASS",
     }
-    (args.cache_dir / "cache_audit.json").write_text(json.dumps(audit, indent=2) + "\n", encoding="utf-8")
-    return 0
+    audit["CACHE_READY"] = "PASS" if all(audit.get(key) == value for key, value in expected.items()) else "FAIL"
+    return audit
 
 
 def _split_clean_proxy_manifest(source: Path, train_out: Path, eval_out: Path) -> None:

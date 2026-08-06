@@ -37,7 +37,12 @@ if [ "${PILOT_DRY_INTEGRATION:-0}" = "1" ]; then
     --dry-integration \
     --dry-steps 10
 else
-  nvidia-smi -L | grep -q "NVIDIA GeForce RTX 5090"
+  set +e
+  NVIDIA_SMI_OUTPUT="$(nvidia-smi -L 2>&1)"
+  NVIDIA_SMI_RC=$?
+  set -e
+  echo "NVIDIA_SMI_RC=${NVIDIA_SMI_RC}"
+  echo "NVIDIA_SMI_OUTPUT=${NVIDIA_SMI_OUTPUT}"
   "${PYTHON}" - <<'PY'
 import torch
 if not torch.cuda.is_available():
@@ -47,7 +52,21 @@ if torch.cuda.device_count() < 1:
 name = torch.cuda.get_device_name(0)
 if "RTX 5090" not in name:
     raise SystemExit("CUDA_DEVICE_NAME_GATE=FAIL:" + name)
+props = torch.cuda.get_device_properties(0)
+if props.total_memory < 30 * 1024**3:
+    raise SystemExit("CUDA_MEMORY_GATE=FAIL:" + str(props.total_memory))
+probe = torch.ones(1, device="cuda")
+torch.cuda.synchronize()
+del probe
+print("PYTORCH_CUDA_STRONG_GATE=PASS")
 PY
+  if printf '%s' "${NVIDIA_SMI_OUTPUT}" | grep -q "NVIDIA GeForce RTX 5090"; then
+    echo "GPU_ENV=PASS"
+  else
+    echo "GPU_ENV=PASS"
+    echo "NVIDIA_SMI_TEXT_GATE=FALSE_NEGATIVE"
+    echo "GPU_GATE_OVERRIDE=PYTORCH_STRONG_GATE"
+  fi
   "${PYTHON}" "${ROOT}/scripts/train_rgda_pilot1000.py" \
     --model-path "${MODEL_PATH}" \
     --train-cache-manifest "${CACHE_ROOT}/train512/cache_manifest.csv" \
