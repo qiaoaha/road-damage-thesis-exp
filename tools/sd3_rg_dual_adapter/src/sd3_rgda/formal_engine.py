@@ -212,12 +212,18 @@ class Formal5000Runner:
         last = self.checkpoint_dir / "last.pt"
         self._save_checkpoint(last, trainer, state, schedule_sha, manifest_sha, cache_sha)
         best = self.checkpoint_dir / "best_eval.pt"
-        best_diff = trainer.compare_outputs(best, fixed_eval[0])
-        last_diff = trainer.compare_outputs(last, fixed_eval[0])
-        load_adapter_checkpoint(best, trainer.injector.trainable_modules())
-        self._write_full_val_metrics("best_eval", state.best_eval_step, trainer, fixed_val, append=True)
-        load_adapter_checkpoint(last, trainer.injector.trainable_modules())
-        self._write_full_val_metrics("last", state.step, trainer, fixed_val, append=True)
+        best_diff, last_diff = run_checkpoint_reload_evaluations(
+            trainer=trainer,
+            best=best,
+            last=last,
+            fixed_eval=fixed_eval,
+            fixed_val=fixed_val,
+            write_full_val=lambda tag, step, active_trainer, batches, append: self._write_full_val_metrics(
+                tag, step, active_trainer, batches, append
+            ),
+            best_step=state.best_eval_step,
+            last_step=state.step,
+        )
         usage_audit = _write_usage(self.report_dir / "sample_usage.csv", train_rows, state.sample_usage_counts, schedule)
         base_after = trainer.base_parameter_hash()
         final = finalize_formal_gates(
@@ -413,6 +419,7 @@ def finalize_formal_gates(
         "FULL_VAL_FIXED_BATCH": _pass(len(full_val_rows) == 3),
         "TRAIN_LOSS_IMPROVED": _pass(statistics.median(losses[-250:]) <= 0.90 * statistics.median(losses[:250])),
         "EVAL128_LOSS_IMPROVED": _pass(eval_last <= 0.95 * eval0),
+        "BEST_EVAL128_IMPROVED": _pass(state.best_eval_loss <= 0.90 * eval0),
         "FULL_VAL_BEST_IMPROVED": _pass(full.get("best_eval", float("inf")) <= 0.95 * full.get("zero_init", 0.0)),
         "CHECKPOINT_SAVE": _pass(bool(checkpoint_paths) and all(path.exists() and path.stat().st_size > 0 for path in checkpoint_paths)),
         "BEST_CHECKPOINT_RELOAD": _pass(best_diff <= 1e-3),
@@ -451,6 +458,7 @@ def finalize_formal_gates(
         "FULL_VAL_FIXED_BATCH",
         "TRAIN_LOSS_IMPROVED",
         "EVAL128_LOSS_IMPROVED",
+        "BEST_EVAL128_IMPROVED",
         "FULL_VAL_BEST_IMPROVED",
         "CHECKPOINT_SAVE",
         "BEST_CHECKPOINT_RELOAD",
@@ -472,8 +480,30 @@ def audit_formal_manifest(path: Path) -> str:
         and data.get("train_val_overlap") == 0
         and data.get("train_test_overlap") == 0
         and data.get("val_test_overlap") == 0
+        and data.get("eval_test_overlap") == 0
         and data.get("test_leakage") == 0
     )
+
+
+def run_checkpoint_reload_evaluations(
+    *,
+    trainer: Any,
+    best: Path,
+    last: Path,
+    fixed_eval: list[Any],
+    fixed_val: list[Any],
+    write_full_val: Any,
+    best_step: int,
+    last_step: int,
+    loader: Any = load_adapter_checkpoint,
+) -> tuple[float, float]:
+    loader(best, trainer.injector.trainable_modules())
+    best_diff = trainer.compare_outputs(best, fixed_eval[0])
+    write_full_val("best_eval", best_step, trainer, fixed_val, True)
+    loader(last, trainer.injector.trainable_modules())
+    last_diff = trainer.compare_outputs(last, fixed_eval[0])
+    write_full_val("last", last_step, trainer, fixed_val, True)
+    return best_diff, last_diff
 
 
 def audit_formal_schedule(path: Path) -> str:

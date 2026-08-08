@@ -57,6 +57,7 @@ class FormalManifestSummary:
     train_val_overlap: int
     train_test_overlap: int
     val_test_overlap: int
+    eval_test_overlap: int
     test_leakage: int
     duplicate_image_sha256: int
     train_source_split_only: str
@@ -251,8 +252,12 @@ def summarize_formal(
 ) -> FormalManifestSummary:
     train_images = {row["image_path"] for row in train_rows}
     val_images = {row["image_path"] for row in val_rows}
+    eval_images = {row["image_path"] for row in eval_rows}
     test_images = {str(item.image_path.resolve()) for item in test_candidates}
     image_shas = [row["image_sha256"] for row in train_rows]
+    train_test_overlap = len(train_images & test_images)
+    val_test_overlap = len(val_images & test_images)
+    eval_test_overlap = len(eval_images & test_images)
     return FormalManifestSummary(
         train_pool_rows=len(train_rows),
         train_pool_unique_images=len(train_images),
@@ -266,9 +271,10 @@ def summarize_formal(
         eval128_positive=sum(row["is_negative"] == "false" for row in eval_rows),
         eval128_negative=sum(row["is_negative"] == "true" for row in eval_rows),
         train_val_overlap=len(train_images & val_images),
-        train_test_overlap=len(train_images & test_images),
-        val_test_overlap=len(val_images & test_images),
-        test_leakage=0,
+        train_test_overlap=train_test_overlap,
+        val_test_overlap=val_test_overlap,
+        eval_test_overlap=eval_test_overlap,
+        test_leakage=train_test_overlap + val_test_overlap + eval_test_overlap,
         duplicate_image_sha256=len(image_shas) - len(set(image_shas)),
         train_source_split_only="PASS" if all(row["source_split"] == "train" for row in train_rows) else "FAIL",
         class_minimum_gate="PASS" if len(eval_rows) == 128 and all(_anchor_counts(eval_rows).get(cls, 0) == 16 for cls in CLASS_NAMES.values()) else "FAIL",

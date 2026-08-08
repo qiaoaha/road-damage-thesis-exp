@@ -43,9 +43,28 @@ def main() -> int:
 
 
 def write_eval128_cache_manifest(eval128_manifest: Path, val_cache_manifest: Path, out_path: Path) -> list[dict[str, str]]:
-    eval_ids = {row["sample_id"] for row in _read_csv(eval128_manifest)}
+    eval_rows = _read_csv(eval128_manifest)
+    eval_shas = [row.get("image_sha256", "") for row in eval_rows]
+    if len(eval_shas) != 128:
+        raise ValueError(f"EVAL128_MANIFEST_ROWS={len(eval_shas)}")
+    if any(not sha for sha in eval_shas):
+        raise ValueError("EVAL128_IMAGE_SHA256_MISSING")
+    if len(set(eval_shas)) != len(eval_shas):
+        raise ValueError("EVAL128_IMAGE_SHA256_DUPLICATE")
     val_rows = _read_csv(val_cache_manifest)
-    selected = [row for row in val_rows if row["source_sample_id"] in eval_ids]
+    val_by_sha: dict[str, dict[str, str]] = {}
+    for row in val_rows:
+        sha = row.get("source_image_sha256", "")
+        if not sha:
+            raise ValueError("VAL_CACHE_SOURCE_IMAGE_SHA256_MISSING")
+        if sha in val_by_sha:
+            raise ValueError(f"VAL_CACHE_SOURCE_IMAGE_SHA256_DUPLICATE={sha}")
+        val_by_sha[sha] = row
+    selected: list[dict[str, str]] = []
+    for sha in eval_shas:
+        if sha not in val_by_sha:
+            raise ValueError(f"EVAL128_IMAGE_SHA256_UNMATCHED={sha}")
+        selected.append({**val_by_sha[sha], "eval_role": "eval128"})
     if len(selected) != 128:
         raise ValueError(f"EVAL128_CACHE_ROWS={len(selected)}")
     with out_path.open("w", encoding="utf-8", newline="") as handle:
