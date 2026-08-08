@@ -18,6 +18,7 @@ def test_formal_shell_resolves_python_without_plain_python() -> None:
     assert "resolve_python()" in text
     assert "command -v python3.11" in text
     assert "command -v python3" in text
+    assert "/root/autodl-tmp/road_damage_exp/envs/sd3_bgpaste_py311/bin/python3.11" in text
     assert "PYTHON_RESOLUTION=FAIL" in text
 
 

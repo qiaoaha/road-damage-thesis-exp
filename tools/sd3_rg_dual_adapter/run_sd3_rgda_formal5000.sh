@@ -20,6 +20,10 @@ resolve_python() {
     command -v python
     return 0
   fi
+  if [ -x /root/autodl-tmp/road_damage_exp/envs/sd3_bgpaste_py311/bin/python3.11 ]; then
+    printf '%s\n' /root/autodl-tmp/road_damage_exp/envs/sd3_bgpaste_py311/bin/python3.11
+    return 0
+  fi
   echo "PYTHON_RESOLUTION=FAIL" >&2
   return 127
 }
