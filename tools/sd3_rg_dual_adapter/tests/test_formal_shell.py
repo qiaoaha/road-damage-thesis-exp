@@ -13,6 +13,14 @@ def test_formal_shell_defaults_to_real_and_has_dry_opt_in() -> None:
     assert text.index("FORMAL_DRY_INTEGRATION") < text.index("--dry-integration")
 
 
+def test_formal_shell_resolves_python_without_plain_python() -> None:
+    text = (Path(__file__).resolve().parents[1] / "run_sd3_rgda_formal5000.sh").read_text(encoding="utf-8")
+    assert "resolve_python()" in text
+    assert "command -v python3.11" in text
+    assert "command -v python3" in text
+    assert "PYTHON_RESOLUTION=FAIL" in text
+
+
 def test_formal_shell_uses_pytorch_cuda_strong_gate() -> None:
     text = (Path(__file__).resolve().parents[1] / "run_sd3_rgda_formal5000.sh").read_text(encoding="utf-8")
     assert "PYTORCH_CUDA_STRONG_GATE=PASS" in text

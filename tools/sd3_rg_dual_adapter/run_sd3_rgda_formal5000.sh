@@ -3,7 +3,27 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${ROOT}"
-PYTHON="${PYTHON:-python}"
+resolve_python() {
+  if [ -n "${PYTHON:-}" ]; then
+    printf '%s\n' "${PYTHON}"
+    return 0
+  fi
+  if command -v python3.11 >/dev/null 2>&1; then
+    command -v python3.11
+    return 0
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    command -v python3
+    return 0
+  fi
+  if command -v python >/dev/null 2>&1; then
+    command -v python
+    return 0
+  fi
+  echo "PYTHON_RESOLUTION=FAIL" >&2
+  return 127
+}
+PYTHON="$(resolve_python)"
 MODEL_PATH="${MODEL_PATH:-/root/autodl-tmp/road_damage_exp/models/stable-diffusion-3-medium-diffusers}"
 CACHE_ROOT="${CACHE_ROOT:-/root/autodl-tmp/road_damage_exp/cache/sd3_rgda_formal5000}"
 FORMAL_MANIFEST_ROOT="${FORMAL_MANIFEST_ROOT:-${ROOT}/manifests/formal5000}"
