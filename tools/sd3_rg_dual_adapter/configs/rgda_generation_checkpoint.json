@@ -1,0 +1,7 @@
+{
+  "formal_commit": "eb526b07553260d74f0db67a59505bc149fc241f",
+  "best_step": 4250,
+  "checkpoint_filename": "best_eval.pt",
+  "checkpoint_sha256": "dca7d04a8b90b317724bd3572b21b91304f9c98fa36014208cc695df34489bc2",
+  "base_model": "stable-diffusion-3-medium-diffusers"
+}

@@ -1,0 +1,23 @@
+model: yolo11s.pt
+epochs: 100
+imgsz: 640
+batch: 16
+optimizer: auto
+lr: null
+weight_decay: null
+seed: 2026
+patience: 100
+workers: 8
+device: 0
+result_root: results/yolo_rgda_ablation
+groups:
+  real: D0_REAL
+  sd3: D1_REAL_SD3
+  rgda: D2_REAL_RGDA
+reuse_policy:
+  require_split_identity: true
+  require_model_identity: true
+  require_hyperparameter_identity: true
+  require_seed_identity: true
+  require_dataset_content_sha: true
+  require_synthetic_content_sha: true
