@@ -61,6 +61,8 @@ def test_generation_audit_checks_pairs_and_label_sha(tmp_path: Path) -> None:
         "generation_seconds",
         "peak_allocated_mib",
         "peak_reserved_mib",
+        "transformer_forward_count",
+        "rgda_hook_call_count",
         "status",
         "error_type",
         "error_message",
@@ -78,7 +80,7 @@ def test_generation_audit_checks_pairs_and_label_sha(tmp_path: Path) -> None:
                     "prompt": row["prompt"],
                     "source_image_sha256": row["source_image_sha256"],
                     "source_label_sha256": row["source_label_sha256"],
-                    "rgda_checkpoint_sha256": row["rgda_checkpoint_sha256"],
+                    "rgda_checkpoint_sha256": "NONE" if mode == "base" else row["rgda_checkpoint_sha256"],
                     "output_image_path": image,
                     "output_image_sha256": sha256_file(image),
                     "output_label_path": label,
@@ -91,12 +93,16 @@ def test_generation_audit_checks_pairs_and_label_sha(tmp_path: Path) -> None:
                     "generation_seconds": "0.1",
                     "peak_allocated_mib": "0",
                     "peak_reserved_mib": "0",
+                    "transformer_forward_count": "1",
+                    "rgda_hook_call_count": "0" if mode == "base" else "1",
                     "status": "PASS",
                     "error_type": "",
                     "error_message": "",
                 }
             )
     audit = audit_generation_results(manifest, results, expected_checkpoint_sha256="abc")
-    assert audit.generated_success == 2
+    assert audit.base_success == 1
+    assert audit.rgda_success == 1
     assert audit.base_rgda_seed_pair_match == "1/1000"
-    assert audit.checkpoint_sha_match == "PASS"
+    assert audit.rgda_checkpoint_sha_match == "1/1000"
+    assert audit.base_checkpoint_field_none == "1/1000"

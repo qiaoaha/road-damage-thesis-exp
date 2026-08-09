@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import csv
+import os
 import shutil
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import torch
 from PIL import Image
@@ -20,6 +22,51 @@ from sd3_rgda.injector import RGDAConditionBatch, RGDAInjector, RGDAPatchHook
 from sd3_rgda.sd3_hook import resolve_patch_embedding, temporary_forward_hook
 
 Mode = str
+
+GENERATION_RESULT_FIELDS = [
+    "generation_index",
+    "mode",
+    "source_sample_id",
+    "seed",
+    "prompt",
+    "source_image_sha256",
+    "source_label_sha256",
+    "rgda_checkpoint_sha256",
+    "output_image_path",
+    "output_image_sha256",
+    "output_label_path",
+    "output_label_sha256",
+    "width",
+    "height",
+    "inference_steps",
+    "guidance_scale",
+    "scheduler",
+    "generation_seconds",
+    "peak_allocated_mib",
+    "peak_reserved_mib",
+    "transformer_forward_count",
+    "rgda_hook_call_count",
+    "status",
+    "error_type",
+    "error_message",
+]
+
+
+@dataclass(frozen=True)
+class FormalCacheRecord:
+    source_image_sha256: str
+    cache_path: Path
+
+
+@dataclass(frozen=True)
+class GenerationRunSummary:
+    result_rows: int
+    base_success: int
+    rgda_success: int
+    failures: int
+    cache_matched: int
+    cache_missing: int
+    cache_duplicate: int
 
 
 def verify_checkpoint_sha256(path: str | Path, expected_sha256: str) -> str:
@@ -63,7 +110,7 @@ def rgda_inference_context(
     hook_calls: list[int] = []
 
     def patched_forward(*args: Any, **kwargs: Any) -> Any:
-        timestep = _extract_timestep(args, kwargs)
+        timestep = _extract_timestep(args, kwargs).to(device=pseudo_clean_latent.device)
         condition = RGDAConditionBatch(
             pseudo_clean_latents=pseudo_clean_latent,
             rg_maps=rg_map_latent,
@@ -143,8 +190,21 @@ def completed_result_is_valid(
     label_path = Path(result.get("output_label_path", ""))
     if result.get("status") != "PASS" or result.get("mode") != mode:
         return False
-    if result.get("seed") != row["seed"] or result.get("rgda_checkpoint_sha256") != checkpoint_sha256:
+    expected_checkpoint = "NONE" if mode == "base" else checkpoint_sha256
+    if result.get("seed") != row["seed"] or result.get("rgda_checkpoint_sha256") != expected_checkpoint:
         return False
+    for key, row_key in [
+        ("generation_index", "generation_index"),
+        ("source_image_sha256", "source_image_sha256"),
+        ("prompt", "prompt"),
+        ("width", "width"),
+        ("height", "height"),
+        ("inference_steps", "num_inference_steps"),
+        ("guidance_scale", "guidance_scale"),
+        ("scheduler", "scheduler"),
+    ]:
+        if result.get(key) != row[row_key]:
+            return False
     if not image_path.exists() or not label_path.exists():
         return False
     try:
@@ -160,35 +220,14 @@ def completed_result_is_valid(
     )
 
 
-def append_generation_result(path: str | Path, row: dict[str, str], result: dict[str, str]) -> None:
-    fields = [
-        "generation_index",
-        "mode",
-        "source_sample_id",
-        "seed",
-        "prompt",
-        "source_image_sha256",
-        "source_label_sha256",
-        "rgda_checkpoint_sha256",
-        "output_image_path",
-        "output_image_sha256",
-        "output_label_path",
-        "output_label_sha256",
-        "width",
-        "height",
-        "inference_steps",
-        "guidance_scale",
-        "scheduler",
-        "generation_seconds",
-        "peak_allocated_mib",
-        "peak_reserved_mib",
-        "status",
-        "error_type",
-        "error_message",
-    ]
+def upsert_generation_result(path: str | Path, row: dict[str, str], result: dict[str, str]) -> None:
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    exists = out.exists()
+    existing: dict[tuple[str, str], dict[str, str]] = {}
+    if out.exists():
+        with out.open(newline="", encoding="utf-8") as handle:
+            for item in csv.DictReader(handle):
+                existing[(item["mode"], item["generation_index"])] = item
     merged = {
         "generation_index": row["generation_index"],
         "source_sample_id": row["source_sample_id"],
@@ -204,11 +243,195 @@ def append_generation_result(path: str | Path, row: dict[str, str], result: dict
         "scheduler": row["scheduler"],
         **result,
     }
-    with out.open("a", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
-        if not exists:
-            writer.writeheader()
-        writer.writerow({key: str(merged.get(key, "")) for key in fields})
+    existing[(str(merged["mode"]), str(merged["generation_index"]))] = {
+        key: str(merged.get(key, "")) for key in GENERATION_RESULT_FIELDS
+    }
+    tmp = out.with_suffix(out.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=GENERATION_RESULT_FIELDS)
+        writer.writeheader()
+        for key in sorted(existing, key=lambda item: (int(item[1]), item[0])):
+            writer.writerow(existing[key])
+    os.replace(tmp, out)
+
+
+def append_generation_result(path: str | Path, row: dict[str, str], result: dict[str, str]) -> None:
+    upsert_generation_result(path, row, result)
+
+
+def read_generation_results(path: str | Path) -> dict[tuple[str, str], dict[str, str]]:
+    p = Path(path)
+    if not p.exists():
+        return {}
+    with p.open(newline="", encoding="utf-8") as handle:
+        return {(row["mode"], row["generation_index"]): row for row in csv.DictReader(handle)}
+
+
+def build_formal_generation_cache_index(cache_manifest: str | Path) -> tuple[dict[str, FormalCacheRecord], int]:
+    index: dict[str, FormalCacheRecord] = {}
+    duplicates = 0
+    with Path(cache_manifest).open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            sha = row.get("source_image_sha256") or row.get("image_sha256")
+            cache_path = row.get("cache_path") or row.get("pt_path") or row.get("path")
+            if not sha or not cache_path:
+                continue
+            if sha in index:
+                duplicates += 1
+                continue
+            index[sha] = FormalCacheRecord(source_image_sha256=sha, cache_path=Path(cache_path))
+    return index, duplicates
+
+
+def validate_generation_cache_join(rows: list[dict[str, str]], cache_manifest: str | Path) -> tuple[int, int, int]:
+    index, duplicates = build_formal_generation_cache_index(cache_manifest)
+    matched = sum(row["source_image_sha256"] in index for row in rows)
+    missing = len(rows) - matched
+    if missing or duplicates:
+        raise ValueError(f"GENERATION_CACHE_JOIN=FAIL CACHE_MATCHED={matched} CACHE_MISSING={missing} CACHE_DUPLICATE={duplicates}")
+    return matched, missing, duplicates
+
+
+def run_paired_generation(
+    rows: list[dict[str, str]],
+    *,
+    pipe: Any,
+    output_root: str | Path,
+    results_csv: str | Path,
+    checkpoint_sha256: str,
+    injector: RGDAInjector | None,
+    condition_loader: Callable[[dict[str, str]], tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+    resume: bool = False,
+    modes: tuple[str, ...] = ("base", "rgda"),
+) -> GenerationRunSummary:
+    output = Path(output_root)
+    results = read_generation_results(results_csv)
+    base_success = rgda_success = failures = 0
+    for row in rows:
+        for mode in modes:
+            expected_sha = "NONE" if mode == "base" else checkpoint_sha256
+            existing = results.get((mode, row["generation_index"]))
+            if resume and existing and completed_result_is_valid(row, existing, mode=mode, checkpoint_sha256=checkpoint_sha256):
+                if mode == "base":
+                    base_success += 1
+                else:
+                    rgda_success += 1
+                continue
+            try:
+                result = _generate_one(pipe, row, mode, output, expected_sha, injector, condition_loader)
+                if result["status"] == "PASS":
+                    if mode == "base":
+                        base_success += 1
+                    else:
+                        rgda_success += 1
+                else:
+                    failures += 1
+            except (RuntimeError, ValueError, OSError) as exc:
+                result = _failure_result(row, mode, expected_sha, exc)
+                failures += 1
+                upsert_generation_result(results_csv, row, result)
+                raise
+            upsert_generation_result(results_csv, row, result)
+    final = read_generation_results(results_csv)
+    return GenerationRunSummary(
+        result_rows=len(final),
+        base_success=base_success,
+        rgda_success=rgda_success,
+        failures=failures,
+        cache_matched=0,
+        cache_missing=0,
+        cache_duplicate=0,
+    )
+
+
+def _generate_one(
+    pipe: Any,
+    row: dict[str, str],
+    mode: str,
+    output_root: Path,
+    checkpoint_sha: str,
+    injector: RGDAInjector | None,
+    condition_loader: Callable[[dict[str, str]], tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+) -> dict[str, str]:
+    image_name = row["base_output_filename"] if mode == "base" else row["rgda_output_filename"]
+    out_image = output_root / mode / "images" / image_name
+    out_label = output_root / mode / "labels" / f"{Path(image_name).stem}.txt"
+    if hasattr(torch, "cuda") and torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+    condition = None if mode == "base" else condition_loader(row)
+    generated, seconds = timed_generation(
+        lambda: run_with_optional_rgda(
+            pipe,
+            mode=mode,
+            prompt=row["prompt"],
+            seed=int(row["seed"]),
+            height=int(row["height"]),
+            width=int(row["width"]),
+            num_inference_steps=int(row["num_inference_steps"]),
+            guidance_scale=float(row["guidance_scale"]),
+            injector=injector,
+            condition=condition,
+        )
+    )
+    output_obj, calls = generated
+    image = _extract_image(output_obj)
+    out_image.parent.mkdir(parents=True, exist_ok=True)
+    image.save(out_image)
+    with Image.open(out_image) as reopened:
+        if reopened.mode != "RGB" or reopened.size != (int(row["width"]), int(row["height"])):
+            raise RuntimeError("generated image failed RGB/shape validation")
+    label_sha = copy_label_with_sha(row["source_label_path"], out_label)
+    allocated = reserved = "0"
+    if hasattr(torch, "cuda") and torch.cuda.is_available():
+        allocated = str(torch.cuda.max_memory_allocated() / 1024 / 1024)
+        reserved = str(torch.cuda.max_memory_reserved() / 1024 / 1024)
+    forward_count = getattr(getattr(pipe, "transformer", object()), "calls", "")
+    return {
+        "mode": mode,
+        "rgda_checkpoint_sha256": checkpoint_sha,
+        "output_image_path": str(out_image),
+        "output_image_sha256": sha256_file(out_image),
+        "output_label_path": str(out_label),
+        "output_label_sha256": label_sha,
+        "generation_seconds": str(seconds),
+        "peak_allocated_mib": allocated,
+        "peak_reserved_mib": reserved,
+        "transformer_forward_count": str(forward_count),
+        "rgda_hook_call_count": str(sum(calls)),
+        "status": "PASS",
+        "error_type": "",
+        "error_message": "",
+    }
+
+
+def _extract_image(output: Any) -> Image.Image:
+    if isinstance(output, Image.Image):
+        return output.convert("RGB")
+    images = getattr(output, "images", None)
+    if images:
+        return cast(Image.Image, images[0].convert("RGB"))
+    if isinstance(output, (list, tuple)) and output and isinstance(output[0], Image.Image):
+        return output[0].convert("RGB")
+    raise RuntimeError("pipeline output did not contain a PIL image")
+
+
+def _failure_result(row: dict[str, str], mode: str, checkpoint_sha: str, exc: BaseException) -> dict[str, str]:
+    return {
+        "mode": mode,
+        "rgda_checkpoint_sha256": checkpoint_sha,
+        "output_image_path": "",
+        "output_image_sha256": "",
+        "output_label_path": "",
+        "output_label_sha256": "",
+        "generation_seconds": "0",
+        "peak_allocated_mib": "0",
+        "peak_reserved_mib": "0",
+        "transformer_forward_count": "0",
+        "rgda_hook_call_count": "0",
+        "status": "FAIL",
+        "error_type": type(exc).__name__,
+        "error_message": str(exc),
+    }
 
 
 def timed_generation(call: Callable[[], Any]) -> tuple[Any, float]:

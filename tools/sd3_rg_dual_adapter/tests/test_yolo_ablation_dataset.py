@@ -15,7 +15,18 @@ def test_yolo_dataset_keeps_synthetic_out_of_val_test(tmp_path: Path) -> None:
     for index in range(6):
         Image.new("RGB", (16, 16), (index, 1, 1)).save(synth_i / f"s{index}.jpg")
         (synth_l / f"s{index}.txt").write_text("", encoding="utf-8")
-    audit = build_yolo_ablation_dataset(real, tmp_path / "out", group="rgda", synthetic_images=synth_i, synthetic_labels=synth_l, link_mode="copy")
+    audit = build_yolo_ablation_dataset(
+        real,
+        tmp_path / "out",
+        group="rgda",
+        synthetic_images=synth_i,
+        synthetic_labels=synth_l,
+        link_mode="copy",
+        expected_real_train=10,
+        expected_val=4,
+        expected_test=4,
+        expected_synthetic=6,
+    )
     assert audit.dataset_gate == "PASS"
     assert audit.train_images == 16
     assert audit.val_images == 4

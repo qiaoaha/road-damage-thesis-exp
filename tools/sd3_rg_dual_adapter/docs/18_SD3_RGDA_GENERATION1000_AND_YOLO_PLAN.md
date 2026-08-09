@@ -12,7 +12,14 @@ The fixed base code is `eb526b07553260d74f0db67a59505bc149fc241f`. The only perm
 
 ## Baseline Trace
 
-The old Czech SD3-1000 baseline is reusable only if the exact 1000 sources, prompts, seeds, inference parameters, scheduler, labels, and output mapping are recovered. If any part remains unproven, the GPU phase regenerates a paired baseline:
+The old Czech SD3-1000 baseline was not recoverable with exact source, prompt, seed, parameter, label, and output evidence. Therefore old B0/B1 numbers are historical reference only, not the formal control for this experiment.
+
+```text
+OLD_RESULTS_ROLE=HISTORICAL_REFERENCE_ONLY
+NEW_PAIRED_BASELINE_REQUIRED=YES
+```
+
+The GPU phase regenerates a paired baseline:
 
 | Group | Generator | RGDA | Source | Seed |
 |---|---|---|---|---|
@@ -21,11 +28,11 @@ The old Czech SD3-1000 baseline is reusable only if the exact 1000 sources, prom
 
 ## Source Selection
 
-Generation1000 uses only Czech train sources. The preferred deterministic design is all 750 positive train images plus 250 negatives sampled from the 1230 train negatives with seed 2026. Val and test are never used for generation or training augmentation.
+Generation1000 uses only Czech train sources. The deterministic design is all 750 positive train images plus 250 negatives sampled from the 1230 train negatives with seed 2026. Val and test are never used for generation or training augmentation.
 
 ## Prompt And Seed
 
-Prompts are deterministic class templates, with no aesthetic style words. Seeds are per-row:
+The fixed paired protocol uses 512x512 resolution, `FlowMatchEulerDiscreteScheduler`, 28 inference steps, guidance scale 4.5, and deterministic class templates with no aesthetic style words. These are the new paired protocol parameters, not recovered old-baseline settings. Seeds are per-row:
 
 ```text
 seed_i = 202600000 + generation_index
@@ -55,7 +62,7 @@ The formal GPU output root is:
 /root/autodl-tmp/road_damage_exp/generated/sd3_rgda_generation1000/
 ```
 
-It contains `paired_manifest.csv`, `base/images`, `base/labels`, `rgda/images`, `rgda/labels`, and `qa` reports. If G0 is fully reused from an old baseline, the base directory may be represented by an external-reference manifest instead of copying images.
+It contains `generation_results.csv`, `base/images`, `base/labels`, `rgda/images`, `rgda/labels`, and `qa` reports. The formal paired run has 2000 synthetic outputs: 1000 Base and 1000 RGDA. Smoke output is isolated under `/root/autodl-tmp/road_damage_exp/generated/sd3_rgda_generation1000_smoke/`.
 
 ## Resume And QA
 
@@ -63,7 +70,7 @@ Resume is valid only when image, label, image dimensions, image SHA, label SHA, 
 
 ## YOLO Ablation
 
-Datasets use fixed splits:
+Datasets use fixed splits and every group is retrained:
 
 | Group | Train data | Synthetic | RGDA | P | R | mAP50 | mAP50-95 |
 |---|---|---:|---|---:|---:|---:|---:|
@@ -73,7 +80,7 @@ Datasets use fixed splits:
 
 Val and test are identical real Czech splits in all groups. Synthetic images are train-only and prefixed as `sd3base_` or `sd3rgda_` to avoid collisions.
 
-Primary deltas are:
+All primary metrics come from fixed Czech test425 evaluation using each group's `best.pt`, not from the training-time validation curve. Primary deltas are:
 
 ```text
 Delta SD3 = D1 - D0
