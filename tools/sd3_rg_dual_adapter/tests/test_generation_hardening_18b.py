@@ -84,6 +84,40 @@ def test_paired_results_expect_2000_and_checkpoint_fields(tmp_path: Path) -> Non
     assert audit.audit_gate == "PASS"
 
 
+def test_smoke_audit_accepts_32_rows_and_rejects_31(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.csv"
+    results = tmp_path / "results.csv"
+    rows = _small_rows(tmp_path, 16)
+    _write_manifest(manifest, rows)
+    _write_results(results, rows)
+    audit = audit_generation_results(manifest, results, expected_checkpoint_sha256="abc", expected_sources=16)
+    assert audit.result_rows == 32
+    assert audit.audit_gate == "PASS"
+    kept = list(csv.DictReader(results.open(newline="", encoding="utf-8")))[:-1]
+    with results.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(kept[0]))
+        writer.writeheader()
+        writer.writerows(kept)
+    audit = audit_generation_results(manifest, results, expected_checkpoint_sha256="abc", expected_sources=16)
+    assert audit.result_rows == 31
+    assert audit.audit_gate == "FAIL"
+
+
+def test_formal_audit_still_requires_2000(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.csv"
+    results = tmp_path / "results.csv"
+    rows = _small_rows(tmp_path, 16)
+    _write_manifest(manifest, rows)
+    _write_results(results, rows)
+    audit = audit_generation_results(manifest, results, expected_checkpoint_sha256="abc")
+    assert audit.audit_gate == "FAIL"
+
+
+def test_smoke_shell_uses_smoke_audit() -> None:
+    shell = Path("run_sd3_rgda_generation1000.sh").read_text(encoding="utf-8")
+    assert "--smoke || exit 1" in shell
+
+
 def test_yolo_synthetic_count_not_1000_fails_and_no_double_prefix(tmp_path: Path) -> None:
     real = tmp_path / "real"
     make_yolo(real, train=10, val=4, test=4)
@@ -141,6 +175,40 @@ def _write_cache(path: Path, rows: list[tuple[str, str]]) -> None:
             writer.writerow({"source_image_sha256": sha, "cache_path": cache_path})
 
 
+def _small_rows(root: Path, count: int) -> list[dict[str, str]]:
+    rows = []
+    for index in range(count):
+        image = root / f"im_{index}.png"
+        label = root / f"im_{index}.txt"
+        Image.new("RGB", (8, 8), (index % 255, 0, 0)).save(image)
+        label.write_text("", encoding="utf-8")
+        rows.append(
+            {
+                "generation_index": str(index),
+                "source_sample_id": f"s{index}",
+                "source_image_path": str(image),
+                "source_label_path": str(label),
+                "source_image_sha256": sha256_file(image),
+                "source_label_sha256": sha256_file(label),
+                "source_split": "train",
+                "is_negative": "true" if index < count // 2 else "false",
+                "anchor_class": "",
+                "class_ids": "",
+                "prompt": "p",
+                "seed": str(202600000 + index),
+                "width": "8",
+                "height": "8",
+                "num_inference_steps": "1",
+                "guidance_scale": "1.0",
+                "scheduler": "S",
+                "base_output_filename": f"b{index}.png",
+                "rgda_output_filename": f"r{index}.png",
+                "rgda_checkpoint_sha256": "abc",
+            }
+        )
+    return rows
+
+
 def _write_manifest(path: Path, rows: list[dict[str, str]]) -> None:
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=GENERATION_FIELDS)
@@ -181,6 +249,15 @@ def _write_results(path: Path, rows: list[dict[str, str]]) -> None:
         writer.writeheader()
         for row in rows:
             for mode in ["base", "rgda"]:
+                out_image = path.parent / f"{mode}_{row['generation_index']}.png"
+                img = Image.new(
+                    "RGB",
+                    (8, 8),
+                    (int(row["generation_index"]) % 255, 1 if mode == "base" else 2, 3),
+                )
+                idx = int(row["generation_index"])
+                img.putpixel((idx % 8, (idx // 8) % 8), (idx % 255, (idx // 255) % 255, 1 if mode == "base" else 2))
+                img.save(out_image)
                 writer.writerow(
                     {
                         "generation_index": row["generation_index"],
@@ -191,8 +268,8 @@ def _write_results(path: Path, rows: list[dict[str, str]]) -> None:
                         "source_image_sha256": row["source_image_sha256"],
                         "source_label_sha256": row["source_label_sha256"],
                         "rgda_checkpoint_sha256": "NONE" if mode == "base" else "abc",
-                        "output_image_path": row["source_image_path"],
-                        "output_image_sha256": row["source_image_sha256"],
+                        "output_image_path": out_image,
+                        "output_image_sha256": sha256_file(out_image),
                         "output_label_path": row["source_label_path"],
                         "output_label_sha256": row["source_label_sha256"],
                         "width": row["width"],

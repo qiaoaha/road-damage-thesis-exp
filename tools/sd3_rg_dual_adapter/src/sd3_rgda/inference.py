@@ -69,6 +69,12 @@ class GenerationRunSummary:
     cache_duplicate: int
 
 
+@dataclass
+class RGDAInferenceStats:
+    transformer_forward_count: int = 0
+    rgda_hook_call_count: int = 0
+
+
 def verify_checkpoint_sha256(path: str | Path, expected_sha256: str) -> str:
     actual = sha256_file(path)
     if actual.lower() != expected_sha256.lower():
@@ -105,32 +111,72 @@ def rgda_inference_context(
     pseudo_clean_latent: torch.Tensor,
     rg_map_latent: torch.Tensor,
     token_mask: torch.Tensor,
-) -> Iterator[list[int]]:
+) -> Iterator[RGDAInferenceStats]:
     original_forward = transformer.forward
-    hook_calls: list[int] = []
+    stats = RGDAInferenceStats()
 
     def patched_forward(*args: Any, **kwargs: Any) -> Any:
-        timestep = _extract_timestep(args, kwargs).to(device=pseudo_clean_latent.device)
+        hidden_states = _extract_hidden_states(args, kwargs)
+        target_batch = int(hidden_states.shape[0])
+        timestep = _expand_timestep_to_batch(_extract_timestep(args, kwargs), target_batch).to(
+            device=pseudo_clean_latent.device
+        )
+        pseudo_batch, rg_batch, mask_batch = expand_rgda_condition_to_batch(
+            pseudo_clean_latent,
+            rg_map_latent,
+            token_mask,
+            target_batch,
+        )
         condition = RGDAConditionBatch(
-            pseudo_clean_latents=pseudo_clean_latent,
-            rg_maps=rg_map_latent,
-            token_mask=token_mask,
+            pseudo_clean_latents=pseudo_batch,
+            rg_maps=rg_batch,
+            token_mask=mask_batch,
             timesteps=timestep,
         )
         _name, patch_embed = resolve_patch_embedding(transformer)
         patch_hook = RGDAPatchHook(injector, condition)
+        stats.transformer_forward_count += 1
         with temporary_forward_hook(patch_embed, patch_hook):
             result = original_forward(*args, **kwargs)
-        hook_calls.append(patch_hook.calls)
+        stats.rgda_hook_call_count += patch_hook.calls
         if patch_hook.calls != 1:
             raise RuntimeError(f"Expected exactly one RGDA patch hook call, got {patch_hook.calls}")
         return result
 
     transformer.forward = patched_forward
     try:
-        yield hook_calls
+        yield stats
     finally:
         transformer.forward = original_forward
+
+
+@contextmanager
+def transformer_forward_counter(transformer: nn.Module) -> Iterator[RGDAInferenceStats]:
+    original_forward = transformer.forward
+    stats = RGDAInferenceStats()
+
+    def counted_forward(*args: Any, **kwargs: Any) -> Any:
+        stats.transformer_forward_count += 1
+        return original_forward(*args, **kwargs)
+
+    transformer.forward = counted_forward
+    try:
+        yield stats
+    finally:
+        transformer.forward = original_forward
+
+
+def expand_rgda_condition_to_batch(
+    pseudo_clean_latent: torch.Tensor,
+    rg_map_latent: torch.Tensor,
+    token_mask: torch.Tensor,
+    target_batch: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return (
+        _expand_first_dim(pseudo_clean_latent, target_batch, "pseudo_clean_latent"),
+        _expand_first_dim(rg_map_latent, target_batch, "rg_map_latent"),
+        _expand_first_dim(token_mask, target_batch, "token_mask"),
+    )
 
 
 def run_with_optional_rgda(
@@ -146,7 +192,7 @@ def run_with_optional_rgda(
     injector: RGDAInjector | None = None,
     condition: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     generator_factory: Callable[[int], Any] | None = None,
-) -> tuple[Any, list[int]]:
+) -> tuple[Any, RGDAInferenceStats]:
     generator = generator_factory(seed) if generator_factory is not None else torch.Generator(device="cpu").manual_seed(seed)
     kwargs = {
         "prompt": prompt,
@@ -157,15 +203,17 @@ def run_with_optional_rgda(
         "generator": generator,
     }
     if mode == "base":
-        return pipe(**kwargs), []
+        with transformer_forward_counter(pipe.transformer) as stats:
+            output = pipe(**kwargs)
+        return output, stats
     if mode != "rgda":
         raise ValueError(f"Unsupported mode {mode}")
     if injector is None or condition is None:
         raise ValueError("RGDA mode requires injector and condition tensors")
     pseudo_clean, rg_map, token_mask = condition
-    with torch.inference_mode(), rgda_inference_context(pipe.transformer, injector, pseudo_clean, rg_map, token_mask) as calls:
+    with torch.inference_mode(), rgda_inference_context(pipe.transformer, injector, pseudo_clean, rg_map, token_mask) as stats:
         output = pipe(**kwargs)
-    return output, calls
+    return output, stats
 
 
 def copy_label_with_sha(source_label: str | Path, output_label: str | Path) -> str:
@@ -373,7 +421,7 @@ def _generate_one(
             condition=condition,
         )
     )
-    output_obj, calls = generated
+    output_obj, stats = generated
     image = _extract_image(output_obj)
     out_image.parent.mkdir(parents=True, exist_ok=True)
     image.save(out_image)
@@ -385,7 +433,12 @@ def _generate_one(
     if hasattr(torch, "cuda") and torch.cuda.is_available():
         allocated = str(torch.cuda.max_memory_allocated() / 1024 / 1024)
         reserved = str(torch.cuda.max_memory_reserved() / 1024 / 1024)
-    forward_count = getattr(getattr(pipe, "transformer", object()), "calls", "")
+    if stats.transformer_forward_count <= 0:
+        raise RuntimeError("TRANSFORMER_FORWARD_COUNT_ZERO")
+    if mode == "base" and stats.rgda_hook_call_count != 0:
+        raise RuntimeError("BASE_RGDA_HOOK_CALLS_NONZERO")
+    if mode == "rgda" and stats.rgda_hook_call_count != stats.transformer_forward_count:
+        raise RuntimeError("RGDA_HOOK_FORWARD_COUNT_MISMATCH")
     return {
         "mode": mode,
         "rgda_checkpoint_sha256": checkpoint_sha,
@@ -396,8 +449,8 @@ def _generate_one(
         "generation_seconds": str(seconds),
         "peak_allocated_mib": allocated,
         "peak_reserved_mib": reserved,
-        "transformer_forward_count": str(forward_count),
-        "rgda_hook_call_count": str(sum(calls)),
+        "transformer_forward_count": str(stats.transformer_forward_count),
+        "rgda_hook_call_count": str(stats.rgda_hook_call_count),
         "status": "PASS",
         "error_type": "",
         "error_message": "",
@@ -449,6 +502,34 @@ def _extract_timestep(args: tuple[Any, ...], kwargs: dict[str, Any]) -> torch.Te
     if isinstance(value, torch.Tensor):
         return value.flatten().float()
     return torch.as_tensor([float(value)], dtype=torch.float32)
+
+
+def _extract_hidden_states(args: tuple[Any, ...], kwargs: dict[str, Any]) -> torch.Tensor:
+    value = kwargs.get("hidden_states", None)
+    if value is None and args:
+        value = args[0]
+    if not isinstance(value, torch.Tensor):
+        raise TypeError("Could not extract SD3 hidden_states for RGDA batch alignment")
+    return value
+
+
+def _expand_first_dim(tensor: torch.Tensor, target_batch: int, name: str) -> torch.Tensor:
+    current = int(tensor.shape[0])
+    if current == target_batch:
+        return tensor
+    if current == 1 and target_batch > 1:
+        repeats = [target_batch] + [1] * (tensor.ndim - 1)
+        return tensor.repeat(*repeats)
+    raise ValueError(f"RGDA_CONDITION_BATCH_MISMATCH {name} batch={current} target={target_batch}")
+
+
+def _expand_timestep_to_batch(timestep: torch.Tensor, target_batch: int) -> torch.Tensor:
+    flat = timestep.flatten().float()
+    if flat.numel() == target_batch:
+        return flat
+    if flat.numel() == 1:
+        return flat.repeat(target_batch)
+    raise ValueError(f"RGDA_CONDITION_BATCH_MISMATCH timestep batch={flat.numel()} target={target_batch}")
 
 
 def paired_seed_for_row(row: dict[str, str]) -> int:

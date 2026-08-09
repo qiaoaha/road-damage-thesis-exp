@@ -40,7 +40,8 @@ python "${ROOT}/scripts/audit_rgda_generation1000.py" \
   --manifest "${MANIFEST_DIR}/generation1000.csv" \
   --results "${SMOKE_OUTPUT_ROOT}/generation_results.csv" \
   --checkpoint-sha256 "${RGDA_CHECKPOINT_SHA256}" \
-  --output "${SMOKE_OUTPUT_ROOT}/qa/generation_audit.md" || exit 1
+  --output "${SMOKE_OUTPUT_ROOT}/qa/generation_audit.md" \
+  --smoke || exit 1
 
 if [[ "${STOP_AFTER_SMOKE}" == "1" ]]; then
   exit 0

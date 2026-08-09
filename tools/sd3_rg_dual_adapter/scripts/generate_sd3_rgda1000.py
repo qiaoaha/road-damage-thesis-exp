@@ -63,15 +63,21 @@ def main() -> int:
     expected_scheduler = {row["scheduler"] for row in rows}
     if expected_scheduler != {scheduler_name}:
         raise RuntimeError(f"SCHEDULER_CLASS_MISMATCH expected={expected_scheduler} actual={scheduler_name}")
-    token_dim = int(pipe.transformer.config.num_attention_heads * pipe.transformer.config.attention_head_dim)
-    patch_size = int(pipe.transformer.config.patch_size)
+    token_dim = int(getattr(pipe.transformer.config, "caption_projection_dim", 1536))
+    latent_channels = int(getattr(pipe.transformer.config, "in_channels", 16))
+    patch_size = int(getattr(pipe.transformer.config, "patch_size", 2))
     injector = prepare_injector_from_checkpoint(
         args.checkpoint,
         checkpoint_sha,
         token_dim=token_dim,
-        latent_channels=16,
+        latent_channels=latent_channels,
         patch_size=patch_size,
-    ).to(device="cuda", dtype=torch.bfloat16)
+    ).to(device="cuda")
+    _assert_rgda_fp32(injector)
+    print("RGDA_PARAMETER_DTYPE=torch.float32")
+    print(f"TOKEN_DIM={token_dim}")
+    print(f"LATENT_CHANNELS={latent_channels}")
+    print(f"PATCH_SIZE={patch_size}")
     cache_index, _duplicates = build_formal_generation_cache_index(args.formal_cache_manifest)
 
     def condition_loader(row: dict[str, str]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -98,6 +104,16 @@ def main() -> int:
     print(f"BASE_SUCCESS={summary.base_success}")
     print(f"RGDA_SUCCESS={summary.rgda_success}")
     return 0
+
+
+def _assert_rgda_fp32(injector: torch.nn.Module) -> None:
+    bad = {
+        name: str(parameter.dtype)
+        for name, parameter in injector.named_parameters()
+        if parameter.is_floating_point() and parameter.dtype != torch.float32
+    }
+    if bad:
+        raise RuntimeError(f"RGDA_PARAMETER_DTYPE_GATE=FAIL {bad}")
 
 
 def _select_smoke_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:

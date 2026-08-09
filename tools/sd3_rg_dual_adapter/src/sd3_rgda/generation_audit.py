@@ -11,7 +11,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from sd3_rgda.generation_manifest import read_generation_manifest
+from sd3_rgda.generation_manifest import read_generation_manifest, sha256_file
 
 
 @dataclass(frozen=True)
@@ -28,7 +28,10 @@ class GenerationAudit:
     shape_mismatch: int
     rgb_image_gate: str
     source_label_sha_match: str
+    source_label_file_sha_reverified: str
     negative_label_gate: str
+    base_forward_count_gate: str
+    rgda_forward_hook_gate: str
     val_leakage: int
     test_leakage: int
     rgda_checkpoint_sha_match: str
@@ -60,16 +63,23 @@ def audit_generation_results(
     results_csv: str | Path,
     *,
     expected_checkpoint_sha256: str,
+    expected_sources: int = 1000,
     val_source_shas: set[str] | None = None,
     test_source_shas: set[str] | None = None,
 ) -> GenerationAudit:
-    rows = read_generation_manifest(generation_manifest)
+    all_rows = read_generation_manifest(generation_manifest)
     results = _read_results(results_csv)
+    result_indices = {result["generation_index"] for result in results}
+    rows = [row for row in all_rows if row["generation_index"] in result_indices]
+    if len(rows) != expected_sources:
+        rows = all_rows if expected_sources == 1000 else rows
     result_by_key = {(result["mode"], result["generation_index"]): result for result in results}
     corrupt = 0
     shape = 0
     label_matches = 0
+    file_label_matches = 0
     negative_ok = 0
+    image_sha_reverified = 0
     output_files: list[str] = []
     output_shas: list[str] = []
     source_by_mode: dict[tuple[str, str], dict[str, str]] = {}
@@ -84,10 +94,20 @@ def audit_generation_results(
                     shape += 1
         except OSError:
             corrupt += 1
+        try:
+            image_sha_reverified += sha256_file(result["output_image_path"]) == result["output_image_sha256"]
+        except OSError:
+            pass
         if result["source_label_sha256"] == result["output_label_sha256"]:
             label_matches += 1
-        manifest_row = rows[int(result["generation_index"])]
-        if manifest_row["is_negative"] == "true" and result["source_label_sha256"] == result["output_label_sha256"]:
+        manifest_row = next(row for row in rows if row["generation_index"] == result["generation_index"])
+        try:
+            actual_label_sha = sha256_file(result["output_label_path"])
+        except OSError:
+            actual_label_sha = ""
+        if actual_label_sha == manifest_row["source_label_sha256"] == result["output_label_sha256"]:
+            file_label_matches += 1
+        if manifest_row["is_negative"] == "true" and actual_label_sha == manifest_row["source_label_sha256"]:
             negative_ok += 1
         source_by_mode[(result["mode"], result["generation_index"])] = result
     source_pairs, seed_pairs, prompt_pairs, param_pairs = _pair_counts(source_by_mode)
@@ -107,6 +127,18 @@ def audit_generation_results(
     )
     complete_pairs = all(("base", row["generation_index"]) in result_by_key and ("rgda", row["generation_index"]) in result_by_key for row in rows)
     negative_expected = sum(row["is_negative"] == "true" for row in rows) * 2
+    base_forward_ok = sum(
+        result["mode"] == "base"
+        and int(result.get("transformer_forward_count") or 0) > 0
+        and int(result.get("rgda_hook_call_count") or 0) == 0
+        for result in results
+    )
+    rgda_forward_ok = sum(
+        result["mode"] == "rgda"
+        and int(result.get("transformer_forward_count") or 0) > 0
+        and int(result.get("rgda_hook_call_count") or 0) == int(result.get("transformer_forward_count") or -1)
+        for result in results
+    )
     audit = GenerationAudit(
         result_rows=len(results),
         base_rows=base_rows,
@@ -120,33 +152,44 @@ def audit_generation_results(
         shape_mismatch=shape,
         rgb_image_gate="PASS" if corrupt == 0 else "FAIL",
         source_label_sha_match=f"{label_matches}/{len(results)}",
+        source_label_file_sha_reverified=f"{file_label_matches}/{len(results)}",
         negative_label_gate="PASS" if negative_ok == negative_expected else "FAIL",
+        base_forward_count_gate="PASS" if base_forward_ok == expected_sources else "FAIL",
+        rgda_forward_hook_gate="PASS" if rgda_forward_ok == expected_sources else "FAIL",
         val_leakage=val_leakage,
         test_leakage=test_leakage,
-        rgda_checkpoint_sha_match=f"{rgda_sha}/1000",
-        base_checkpoint_field_none=f"{base_none}/1000",
-        base_rgda_source_pair_match=f"{source_pairs}/1000",
-        base_rgda_seed_pair_match=f"{seed_pairs}/1000",
-        base_rgda_prompt_pair_match=f"{prompt_pairs}/1000",
-        base_rgda_generation_param_match=f"{param_pairs}/1000",
+        rgda_checkpoint_sha_match=f"{rgda_sha}/{expected_sources}",
+        base_checkpoint_field_none=f"{base_none}/{expected_sources}",
+        base_rgda_source_pair_match=f"{source_pairs}/{expected_sources}",
+        base_rgda_seed_pair_match=f"{seed_pairs}/{expected_sources}",
+        base_rgda_prompt_pair_match=f"{prompt_pairs}/{expected_sources}",
+        base_rgda_generation_param_match=f"{param_pairs}/{expected_sources}",
         audit_gate="PASS"
-        if len(rows) == 1000
-        and len(results) == 2000
-        and base_rows == 1000
-        and rgda_rows == 1000
-        and base_success == 1000
-        and rgda_success == 1000
+        if len(rows) == expected_sources
+        and len(results) == expected_sources * 2
+        and base_rows == expected_sources
+        and rgda_rows == expected_sources
+        and base_success == expected_sources
+        and rgda_success == expected_sources
         and failures == 0
+        and len(set(output_files)) == expected_sources * 2
+        and len(set(output_shas)) == expected_sources * 2
+        and image_sha_reverified == expected_sources * 2
+        and label_matches == expected_sources * 2
+        and file_label_matches == expected_sources * 2
+        and negative_ok == negative_expected
         and corrupt == 0
         and shape == 0
         and val_leakage == 0
         and test_leakage == 0
-        and source_pairs == 1000
-        and seed_pairs == 1000
-        and prompt_pairs == 1000
-        and param_pairs == 1000
-        and rgda_sha == 1000
-        and base_none == 1000
+        and base_forward_ok == expected_sources
+        and rgda_forward_ok == expected_sources
+        and source_pairs == expected_sources
+        and seed_pairs == expected_sources
+        and prompt_pairs == expected_sources
+        and param_pairs == expected_sources
+        and rgda_sha == expected_sources
+        and base_none == expected_sources
         and complete_pairs
         else "FAIL",
     )
