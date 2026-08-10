@@ -5,6 +5,7 @@ from pathlib import Path
 
 from sd3_rgda.raal import RAALConfig
 from sd3_rgda.raal_engine import FakeRAALPilotBackend, load_formal_first1000_schedule
+from sd3_rgda.raal_pilot_engine import RealRAALPilotRunner
 
 
 def _parse_layers(raw: str) -> tuple[int, ...]:
@@ -68,7 +69,17 @@ def main() -> None:
     print(f"RAAL_LAYERS={','.join(str(layer) for layer in config.layer_indices)}")
     print(f"SOURCE_SEQUENCE_SHA256={schedule_sha}")
     print("PILOT_R0_R1_SCHEDULE_IDENTITY=PASS")
-    raise SystemExit("Real RAAL Pilot1000 requires the validated GPU environment; use --backend fake for local behavior tests.")
+    RealRAALPilotRunner(
+        arm=args.arm,
+        model_path=args.model_path,
+        train_cache_manifest=args.train_cache_manifest,
+        eval_cache_manifest=args.eval_cache_manifest,
+        schedule_manifest=args.schedule_manifest,
+        report_dir=args.report_dir,
+        steps=args.steps,
+        seed=args.seed,
+        raal_config=config,
+    ).run(args.resume_from)
 
 
 if __name__ == "__main__":
