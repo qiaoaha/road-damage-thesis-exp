@@ -632,11 +632,22 @@ def _resize_boxes(boxes: tuple[Box, ...], source: tuple[int, int], target: tuple
     )
 
 
+CLASS_PHRASES: dict[int, str] = {
+    0: "longitudinal crack",
+    1: "transverse crack",
+    2: "alligator crack",
+    3: "pothole",
+}
+
+
+def prompt_for_classes(class_ids: tuple[int, ...] | list[int]) -> str:
+    return _prompt_for_classes(tuple(class_ids))
+
+
 def _prompt_for_classes(class_ids: tuple[int, ...]) -> str:
     if not class_ids:
         return "a clean road surface without visible damage"
-    names = {0: "longitudinal crack", 1: "transverse crack", 2: "alligator crack", 3: "pothole"}
-    return "road damage: " + ", ".join(names.get(class_id, f"class {class_id}") for class_id in class_ids)
+    return "road damage: " + ", ".join(CLASS_PHRASES.get(class_id, f"class {class_id}") for class_id in class_ids)
 
 
 def _sample_tensors_finite(sample: CachedSD3Sample) -> bool:

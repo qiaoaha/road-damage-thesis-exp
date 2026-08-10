@@ -1,0 +1,22 @@
+{
+  "base_commit": "d4750be67ca680db00213df8e2989d4a6dad592c",
+  "method": "SPATIAL_KL",
+  "description": "CHIMERA-inspired attention-mask supervision for SD3-RGDA; not an exact CHIMERA reproduction.",
+  "train_steps": 1000,
+  "arms": {
+    "R0": {
+      "raal_enabled": false,
+      "raal_weight": 0.0
+    },
+    "R1": {
+      "raal_enabled": true,
+      "raal_weight": 0.02
+    }
+  },
+  "raal_temperature": 1.0,
+  "raal_layers": [5, 11, 17],
+  "text_segment": "T5_ONLY",
+  "t5_max_length": 256,
+  "real_sd3_used_in_code_ready_stage": false,
+  "gpu_used_in_code_ready_stage": false
+}
