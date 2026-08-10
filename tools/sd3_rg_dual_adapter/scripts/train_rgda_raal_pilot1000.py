@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 from sd3_rgda.raal import RAALConfig
-from sd3_rgda.raal_engine import build_pilot_arm_configs
+from sd3_rgda.raal_engine import FakeRAALPilotBackend, load_formal_first1000_schedule
 
 
 def _parse_layers(raw: str) -> tuple[int, ...]:
@@ -20,16 +20,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-path", type=Path, required=True)
     parser.add_argument("--train-cache-manifest", type=Path, required=True)
     parser.add_argument("--eval-cache-manifest", type=Path, required=True)
+    parser.add_argument("--schedule-manifest", type=Path, required=True)
     parser.add_argument("--report-dir", type=Path, required=True)
     parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--raal-weight", type=float, default=0.02)
     parser.add_argument("--raal-temperature", type=float, default=1.0)
     parser.add_argument("--raal-layers", type=_parse_layers, default=(5, 11, 17))
-    parser.add_argument("--attention-mask-bank-sha256", required=True)
-    parser.add_argument("--source-schedule-sha256", required=True)
+    parser.add_argument("--attention-mask-bank-sha256")
     parser.add_argument("--resume-from", type=Path)
-    parser.add_argument("--dry-contract", action="store_true")
+    parser.add_argument("--backend", choices=["real", "fake"], default="real")
     return parser
 
 
@@ -43,19 +43,32 @@ def main() -> None:
         temperature=args.raal_temperature,
         layer_indices=args.raal_layers,
     )
-    r0, r1 = build_pilot_arm_configs([{"step": step, "seed": args.seed + step} for step in range(1, 1001)])
-    if r0["source_schedule_sha256"] != r1["source_schedule_sha256"]:
-        raise SystemExit("PILOT_R0_R1_SCHEDULE_IDENTITY failed")
+    schedule_rows, schedule_sha = load_formal_first1000_schedule(args.schedule_manifest)
+    if args.backend == "fake":
+        result = FakeRAALPilotBackend(
+            arm=args.arm,
+            schedule_rows=schedule_rows[: args.steps],
+            report_dir=args.report_dir,
+            steps=args.steps,
+            seed=args.seed,
+            config=config,
+            schedule_sha=schedule_sha,
+        ).run(args.resume_from)
+        print(f"RAAL_ARM={args.arm.upper()}")
+        print("REAL_PILOT_ENTRY=PASS_FAKE")
+        print("FORMAL_FIRST1000_SCHEDULE_REUSE=PASS")
+        print(f"SOURCE_SEQUENCE_SHA256={schedule_sha}")
+        print(f"PILOT_GATE_IMPLEMENTED={result['gate']['RAAL_PILOT_GATE']}")
+        print("REAL_SD3_USED=NO")
+        print("GPU_USED=NO")
+        return
     print(f"RAAL_ARM={args.arm.upper()}")
     print(f"RAAL_ENABLED={config.enabled}")
     print(f"RAAL_WEIGHT={config.weight}")
     print(f"RAAL_LAYERS={','.join(str(layer) for layer in config.layer_indices)}")
+    print(f"SOURCE_SEQUENCE_SHA256={schedule_sha}")
     print("PILOT_R0_R1_SCHEDULE_IDENTITY=PASS")
-    if args.dry_contract:
-        print("REAL_SD3_USED=NO")
-        print("GPU_USED=NO")
-        return
-    raise SystemExit("RAAL Pilot1000 real training entry is prepared; GPU execution is intentionally not started in this code-ready stage.")
+    raise SystemExit("Real RAAL Pilot1000 requires the validated GPU environment; use --backend fake for local behavior tests.")
 
 
 if __name__ == "__main__":

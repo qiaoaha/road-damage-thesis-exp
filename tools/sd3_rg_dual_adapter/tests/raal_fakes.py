@@ -30,6 +30,8 @@ class FakeAttention(nn.Module):
         self.base_weight = nn.Parameter(torch.ones(1), requires_grad=False)
         nn.init.eye_(self.to_q.weight)
         nn.init.eye_(self.add_k_proj.weight)
+        self.to_q.weight.requires_grad_(False)
+        self.add_k_proj.weight.requires_grad_(False)
 
     def forward(self, hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor) -> torch.Tensor:
         return hidden_states + encoder_hidden_states.mean() * 0.0 + self.base_weight * 0.0
@@ -52,6 +54,20 @@ class FakeTransformer(nn.Module):
     def forward(self, hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor) -> torch.Tensor:
         for block in self.transformer_blocks:
             hidden_states = block(hidden_states, encoder_hidden_states)
+        return hidden_states
+
+
+class FakeCheckpointTransformer(FakeTransformer):
+    def forward(self, hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor) -> torch.Tensor:
+        from torch.utils.checkpoint import checkpoint
+
+        for block in self.transformer_blocks:
+            hidden_states = checkpoint(
+                block,
+                hidden_states,
+                encoder_hidden_states,
+                use_reentrant=False,
+            )
         return hidden_states
 
 

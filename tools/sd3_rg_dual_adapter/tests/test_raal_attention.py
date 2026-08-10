@@ -40,6 +40,15 @@ def test_raal_selected_layers_only() -> None:
     with RAALAttentionCollector(model, RAALConfig(layer_indices=(2, 4)), token_mask, text_mask) as collector:
         model(hidden, text)
     assert [item.layer_index for item in collector.stats.layer_stats] == [2, 4]
+    assert collector.stats.layer_call_counts == {2: 1, 4: 1}
+
+
+def test_actual_per_layer_hook_counts() -> None:
+    model = FakeTransformer()
+    hidden, text, token_mask, text_mask = _inputs()
+    with RAALAttentionCollector(model, RAALConfig(layer_indices=(5, 11, 17)), token_mask, text_mask) as collector:
+        model(hidden, text)
+    assert collector.stats.layer_call_counts == {5: 1, 11: 1, 17: 1}
 
 
 def test_raal_hook_cleanup_after_exception() -> None:

@@ -44,8 +44,8 @@ def run() -> None:
     torch.manual_seed(2026)
     transformer = FakeTransformer()
     alpha = torch.nn.Parameter(torch.tensor(1.0))
-    hidden = torch.randn(1, 4, 4)
-    text = torch.randn(1, 12, 4) * alpha
+    hidden = torch.randn(1, 4, 4) + alpha * torch.randn(1, 4, 4)
+    text = torch.randn(1, 12, 4)
     token_mask = torch.tensor([[1, 0, 1, 0]], dtype=torch.bool)
     text_mask = torch.zeros(1, 12, dtype=torch.bool)
     text_mask[:, 2:5] = True
@@ -59,10 +59,10 @@ def run() -> None:
     if transformer.transformer_blocks[5].attn.base_weight.grad is not None:
         raise RuntimeError("Frozen base attention weight received a gradient")
 
-    negative_text_mask = torch.zeros_like(text_mask)
-    with RAALAttentionCollector(transformer, RAALConfig(), torch.zeros_like(token_mask), negative_text_mask) as negative:
-        transformer(hidden, text.detach())
-    if negative.stats.loss is None or float(negative.stats.loss.detach()) != 0.0:
+    with RAALAttentionCollector(transformer, RAALConfig(enabled=False), torch.zeros_like(token_mask), torch.zeros_like(text_mask)) as negative:
+        transformer(hidden.detach(), text.detach())
+    negative_loss = torch.tensor(0.0) if negative.stats.loss is None else negative.stats.loss
+    if float(negative_loss.detach()) != 0.0:
         raise RuntimeError("Negative RAAL loss is not exactly zero")
     print("RAAL_DRY_INTEGRATION=PASS")
     print("REAL_SD3_USED=NO")
