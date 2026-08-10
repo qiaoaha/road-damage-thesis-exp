@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import random
 from collections.abc import Callable
@@ -110,6 +111,10 @@ class RealRAALPilotRunner:
         self.raal_layer_call_gate = "PASS"
         self.best_reload_diff = float("inf")
         self.last_reload_diff = float("inf")
+        self.best_state_hash_gate = "NOT_RUN"
+        self.last_state_hash_gate = "NOT_RUN"
+        self.checkpoint_reload_restore_gate = "NOT_RUN"
+        self.r0_eval_parameter_hash_unchanged = "NOT_RUN"
 
     def run(self, resume_from: Path | None = None) -> RealRAALPilotResult:
         self.report_dir.mkdir(parents=True, exist_ok=True)
@@ -230,6 +235,11 @@ class RealRAALPilotRunner:
                     state.best_eval_loss = flow_loss
                     state.best_eval_step = step
                     self._save_checkpoint(self.checkpoint_dir / "best_eval.pt", trainer, state)
+                raal_loss = float(eval_row["raal_eval_loss_positive"])
+                if state.best_raal_eval_step == 0 or raal_loss <= min(
+                    float(row["raal_eval_loss_positive"]) for row in state.eval_rows if int(row["step"]) <= step
+                ):
+                    state.best_raal_eval_step = step
             if step % self.checkpoint_interval == 0:
                 self._save_checkpoint(self.checkpoint_dir / f"step_{step:04d}.pt", trainer, state)
         last = self.checkpoint_dir / "last.pt"
@@ -240,8 +250,8 @@ class RealRAALPilotRunner:
         base_after = hash_module_parameters(trainer.transformer)
         if base_after != self.base_hash_before:
             raise RuntimeError("BASE_HASH_GATE_FAIL")
-        self.best_reload_diff = self._checkpoint_reload_diff(trainer, best, fixed_eval)
-        self.last_reload_diff = self._checkpoint_reload_diff(trainer, last, fixed_eval)
+        self.best_reload_diff = self._checkpoint_reload_diff(trainer, best, fixed_eval, "best")
+        self.last_reload_diff = self._checkpoint_reload_diff(trainer, last, fixed_eval, "last")
         self._write_status(state, base_after, trainer)
         return RealRAALPilotResult(state.step, self.report_dir, last, best)
 
@@ -333,15 +343,22 @@ class RealRAALPilotRunner:
         inside: list[float] = []
         outside: list[float] = []
         ratios: list[float] = []
-        with torch.no_grad():
-            for batch in fixed_eval:
-                if self.arm == "R1":
+        before_eval_hash = hash_module_parameters(trainer.injector)
+        for batch in fixed_eval:
+            if self.arm == "R1":
+                with torch.no_grad():
                     components = trainer.forward_loss_components(batch)
                     flow = float(components.flow_loss.detach().cpu())
                     raal = float(components.raal_loss.detach().cpu())
                     metrics = components.metrics
-                else:
-                    if not batch.sample.is_negative:
+            else:
+                with torch.enable_grad():
+                    if batch.sample.is_negative:
+                        flow_tensor = trainer.forward_loss(batch)
+                        flow = float(flow_tensor.detach().cpu())
+                        raal = 0.0
+                        metrics = {"inside_attention_mass": 0.0, "outside_attention_mass": 0.0, "concentration_ratio": 0.0}
+                    else:
                         if self.mask_bank is None:
                             raise RuntimeError("MASK_BANK_MISSING")
                         with RAALAttentionCollector(
@@ -360,20 +377,21 @@ class RealRAALPilotRunner:
                             "outside_attention_mass": float(collector.stats.outside_mass.detach().cpu()) if collector.stats.outside_mass is not None else 0.0,
                             "concentration_ratio": float(collector.stats.concentration_ratio.detach().cpu()) if collector.stats.concentration_ratio is not None else 0.0,
                         }
-                    else:
-                        flow_tensor = trainer.forward_loss(batch)
-                        flow = float(flow_tensor.detach().cpu())
-                        raal = 0.0
-                        metrics = {"inside_attention_mass": 0.0, "outside_attention_mass": 0.0, "concentration_ratio": 0.0}
-                flow_losses.append(flow)
-                if batch.sample.is_negative:
-                    negative_flow.append(flow)
-                else:
-                    positive_flow.append(flow)
-                    positive_raal.append(raal)
-                    inside.append(float(metrics["inside_attention_mass"]))
-                    outside.append(float(metrics["outside_attention_mass"]))
-                    ratios.append(float(metrics["concentration_ratio"]))
+                trainer.optimizer.zero_grad(set_to_none=True)
+            flow_losses.append(flow)
+            if batch.sample.is_negative:
+                negative_flow.append(flow)
+            else:
+                positive_flow.append(flow)
+                positive_raal.append(raal)
+                inside.append(float(metrics["inside_attention_mass"]))
+                outside.append(float(metrics["outside_attention_mass"]))
+                ratios.append(float(metrics["concentration_ratio"]))
+        after_eval_hash = hash_module_parameters(trainer.injector)
+        if after_eval_hash != before_eval_hash:
+            raise RuntimeError("R0_EVAL_PARAMETER_HASH_CHANGED")
+        if self.arm == "R0":
+            self.r0_eval_parameter_hash_unchanged = "PASS"
         trainer.injector.train()
         trainer.transformer.train()
         if len(positive_flow) != 64 or len(negative_flow) != 64:
@@ -413,6 +431,7 @@ class RealRAALPilotRunner:
                 "best_raal_eval_step": state.best_raal_eval_step,
                 "base_hash_before": self.base_hash_before,
                 "initial_rgda_hash": self.initial_rgda_hash,
+                "adapter_state_sha256": _adapter_state_sha256(trainer.injector.trainable_modules()),
             },
         )
         if not inspect_pilot_checkpoint_payload(payload)["adapter_only"]:
@@ -498,13 +517,44 @@ class RealRAALPilotRunner:
                 torch.cuda.set_rng_state_all(cuda_state)
             self.raal_diagnostic_rng_preserved = "PASS" if torch.equal(torch.random.get_rng_state(), torch_state) else "FAIL"
 
-    def _checkpoint_reload_diff(self, trainer: Any, checkpoint: Path, fixed_eval: list[Any]) -> float:
+    def _checkpoint_reload_diff(self, trainer: Any, checkpoint: Path, fixed_eval: list[Any], label: str) -> float:
         if hasattr(trainer, "compare_outputs"):
-            return float(trainer.compare_outputs(checkpoint, fixed_eval[0]))
+            before_hash = hash_module_parameters(trainer.injector)
+            original_state = {
+                name: {key: value.detach().cpu().clone() for key, value in module.state_dict().items()}
+                for name, module in trainer.injector.trainable_modules().items()
+            }
+            payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+            expected_hash = str(payload.get("adapter_state_sha256", ""))
+            actual_hash = _adapter_payload_sha256(payload["modules"])
+            state_gate = "PASS" if expected_hash and actual_hash == expected_hash else "FAIL"
+            if label == "best":
+                self.best_state_hash_gate = state_gate
+            else:
+                self.last_state_hash_gate = state_gate
+            if state_gate != "PASS":
+                return float("inf")
+            try:
+                for name, module in trainer.injector.trainable_modules().items():
+                    module.load_state_dict(payload["modules"][name])
+                diff = float(trainer.compare_outputs(checkpoint, fixed_eval[0]))
+            finally:
+                for name, module in trainer.injector.trainable_modules().items():
+                    module.load_state_dict(original_state[name])
+            self.checkpoint_reload_restore_gate = "PASS" if hash_module_parameters(trainer.injector) == before_hash else "FAIL"
+            return diff
         return 0.0
 
     def _write_status(self, state: RAALPilotResumeState, base_after: str, trainer: Any) -> None:
-        checkpoint_reload_gate = "PASS" if self.best_reload_diff <= 1e-3 and self.last_reload_diff <= 1e-3 else "FAIL"
+        checkpoint_reload_gate = (
+            "PASS"
+            if self.best_reload_diff <= 1e-3
+            and self.last_reload_diff <= 1e-3
+            and self.best_state_hash_gate == "PASS"
+            and self.last_state_hash_gate == "PASS"
+            and self.checkpoint_reload_restore_gate == "PASS"
+            else "FAIL"
+        )
         status = {
             "ARM": self.arm,
             "COMPLETED": str(state.step),
@@ -521,6 +571,10 @@ class RealRAALPilotRunner:
             "RAAL_DIAGNOSTIC_RNG_PRESERVED": self.raal_diagnostic_rng_preserved,
             "BEST_RELOAD_MAX_ABS_DIFF": f"{self.best_reload_diff:.8f}",
             "LAST_RELOAD_MAX_ABS_DIFF": f"{self.last_reload_diff:.8f}",
+            "BEST_CHECKPOINT_STATE_HASH_GATE": self.best_state_hash_gate,
+            "LAST_CHECKPOINT_STATE_HASH_GATE": self.last_state_hash_gate,
+            "CHECKPOINT_RELOAD_RESTORE_GATE": self.checkpoint_reload_restore_gate,
+            "R0_EVAL_PARAMETER_HASH_UNCHANGED": self.r0_eval_parameter_hash_unchanged,
             "CHECKPOINT_RELOAD_GATE": checkpoint_reload_gate,
             "REAL_SD3_USED": "YES",
         }
@@ -652,3 +706,22 @@ def _cuda_allocated_mib() -> float:
 
 def _cuda_reserved_mib() -> float:
     return torch.cuda.memory_reserved() / 1024 / 1024 if torch.cuda.is_available() else 0.0
+
+
+def _adapter_state_sha256(modules: dict[str, torch.nn.Module]) -> str:
+    payload = {name: module.state_dict() for name, module in modules.items()}
+    return _adapter_payload_sha256(payload)
+
+
+def _adapter_payload_sha256(payload: dict[str, Any]) -> str:
+    hasher = hashlib.sha256()
+    for module_name in sorted(payload):
+        hasher.update(module_name.encode("utf-8"))
+        state = payload[module_name]
+        for tensor_name in sorted(state):
+            tensor = state[tensor_name].detach().cpu().contiguous()
+            hasher.update(tensor_name.encode("utf-8"))
+            hasher.update(str(tuple(tensor.shape)).encode("utf-8"))
+            hasher.update(str(tensor.dtype).encode("utf-8"))
+            hasher.update(tensor.view(torch.uint8).numpy().tobytes())
+    return hasher.hexdigest()

@@ -10,7 +10,10 @@ from raal_fakes import FakeTransformer as AttentionTransformer
 from torch import nn
 
 from sd3_rgda.raal import RAALConfig
-from sd3_rgda.raal_pilot_engine import RealRAALPilotRunner, compare_raal_pilot_arms
+from sd3_rgda.raal_pilot_engine import (
+    RealRAALPilotRunner,
+    compare_raal_pilot_arms,
+)
 
 
 class Tokenizer3:
@@ -125,7 +128,10 @@ class FakeTrainer:
     def forward_loss(self, _batch: object) -> torch.Tensor:
         hidden = torch.randn(1, 4, 4)
         text = torch.randn(1, 333, 4)
-        return self.transformer(hidden, text).mean() * 0.0 + sum(parameter.sum() for parameter in self.injector.parameters()).pow(2)
+        loss = self.transformer(hidden, text).mean() * 0.0 + sum(parameter.sum() for parameter in self.injector.parameters()).pow(2)
+        if not loss.requires_grad:
+            raise RuntimeError("loss.requires_grad is false")
+        return loss
 
     def backward_step(self, batch: object) -> dict[str, float]:
         self.optimizer.zero_grad(set_to_none=True)
@@ -139,6 +145,16 @@ class FakeTrainer:
 
     def assert_base_gradients_none(self) -> None:
         assert all(parameter.grad is None for parameter in self.transformer.parameters())
+
+    def compare_outputs(self, checkpoint: Path, _batch: object) -> float:
+        payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        current = self.injector.trainable_modules()["normal_adapter"].state_dict()
+        expected = payload["modules"]["normal_adapter"]
+        diffs = [
+            float((current[name].detach().cpu() - expected[name].detach().cpu()).abs().max())
+            for name in current
+        ]
+        return max(diffs) if diffs else 0.0
 
 
 def _manifest(path: Path, rows: int) -> Path:
@@ -287,15 +303,50 @@ def test_r0_eval_diagnostic_not_zero(tmp_path: Path) -> None:
     assert float(rows[0]["inside_mass_positive"]) > 0.0
 
 
+def test_r0_real_eval_grad_context_strict_forward_loss(tmp_path: Path) -> None:
+    _runner(tmp_path, arm="r0").run()
+    rows = list(csv.DictReader((tmp_path / "r0" / "eval_metrics.csv").open(encoding="utf-8")))
+    assert float(rows[0]["raal_eval_loss_positive"]) > 0.0
+    status = (tmp_path / "r0" / "raal_pilot_status.md").read_text(encoding="utf-8")
+    assert "R0_EVAL_PARAMETER_HASH_UNCHANGED=PASS" in status
+
+
 def test_real_checkpoint_adapter_only(tmp_path: Path) -> None:
     result = _runner(tmp_path).run()
     payload = torch.load(result.last_checkpoint, map_location="cpu", weights_only=False)
     assert set(payload["modules"]) == {"normal_encoder", "rg_encoder", "normal_adapter", "defect_adapter", "timestep_gate"}
+    assert payload["adapter_state_sha256"]
 
 
 def test_best_checkpoint_by_flow_loss(tmp_path: Path) -> None:
     result = _runner(tmp_path, steps=1).run()
     assert result.best_checkpoint.exists()
+
+
+def test_best_checkpoint_earlier_than_last_reload_semantics(tmp_path: Path) -> None:
+    runner = _runner(tmp_path, steps=2)
+    runner.checkpoint_interval = 1
+    result = runner.run()
+    trainer = FakeTrainer("R1", RAALConfig(), runner.mask_bank)
+    trainer.injector.load_state_dict(torch.load(result.last_checkpoint, map_location="cpu", weights_only=False)["modules"]["normal_adapter"], strict=False)
+    diff = runner._checkpoint_reload_diff(trainer, tmp_path / "r1" / "checkpoints" / "r1" / "step_0001.pt", [FakeTrainer("R1", RAALConfig(), runner.mask_bank).build_flow_batch(FakeSample(False))], "best")
+    assert diff <= 1e-3
+    assert runner.best_state_hash_gate == "PASS"
+    assert runner.checkpoint_reload_restore_gate == "PASS"
+
+
+def test_checkpoint_tamper_reject(tmp_path: Path) -> None:
+    runner = _runner(tmp_path, steps=1)
+    result = runner.run()
+    payload = torch.load(result.last_checkpoint, map_location="cpu", weights_only=False)
+    key = next(iter(payload["modules"]["normal_adapter"]))
+    payload["modules"]["normal_adapter"][key] += 1.0
+    tampered = tmp_path / "tampered.pt"
+    torch.save(payload, tampered)
+    trainer = FakeTrainer("R1", RAALConfig(), runner.mask_bank)
+    diff = runner._checkpoint_reload_diff(trainer, tampered, [trainer.build_flow_batch(FakeSample(False))], "last")
+    assert diff == float("inf")
+    assert runner.last_state_hash_gate == "FAIL"
 
 
 def test_resume_config_mismatch(tmp_path: Path) -> None:
@@ -475,6 +526,12 @@ def test_stability_gate_fails_on_rng_diagnostic_failure(tmp_path: Path) -> None:
 
 def test_22d_report_declares_no_gpu() -> None:
     text = Path("reports/22D_RAAL_PILOT_FINAL_CODE_READY.md").read_text(encoding="utf-8")
+    assert "GPU_USED=NO" in text
+
+
+def test_22e_report_declares_execution_ready() -> None:
+    text = Path("reports/22E_RAAL_PILOT_EXECUTION_READY.md").read_text(encoding="utf-8")
+    assert "R0_REAL_EVAL_GRAD_CONTEXT=PASS" in text
     assert "GPU_USED=NO" in text
 
 
