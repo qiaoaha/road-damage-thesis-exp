@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from raal_fakes import FakeTransformer as AttentionTransformer
 from torch import nn
 
 from sd3_rgda.raal import RAALConfig
@@ -40,11 +41,22 @@ class FakeTransformer(nn.Linear):
         with torch.no_grad():
             self.weight.fill_(1.0)
             self.bias.fill_(0.0)
+        self.transformer_blocks = AttentionTransformer().transformer_blocks
+
+    def forward(self, hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor | None = None) -> torch.Tensor:
+        if encoder_hidden_states is None:
+            return super().forward(hidden_states)
+        for block in self.transformer_blocks:
+            hidden_states = block(hidden_states, encoder_hidden_states)
+        return hidden_states
 
 
 class FakeSample:
     def __init__(self, is_negative: bool) -> None:
         self.is_negative = is_negative
+        self.class_ids = () if is_negative else (0,)
+        self.token_mask = torch.zeros(1, 4, dtype=torch.bool) if is_negative else torch.tensor([[1, 0, 1, 0]], dtype=torch.bool)
+        self.prompt_embeds = torch.randn(1, 333, 4)
 
 
 class FakeInjector(nn.Module):
@@ -104,11 +116,16 @@ class FakeTrainer:
                 "inside_attention_mass": 0.75 if not negative else 0.0,
                 "outside_attention_mass": 0.25 if not negative else 0.0,
                 "concentration_ratio": 3.0 if not negative else 0.0,
+                "layer_5_calls": 0.0 if negative else 1.0,
+                "layer_11_calls": 0.0 if negative else 1.0,
+                "layer_17_calls": 0.0 if negative else 1.0,
             },
         )
 
     def forward_loss(self, _batch: object) -> torch.Tensor:
-        return sum(parameter.sum() for parameter in self.injector.parameters()).pow(2)
+        hidden = torch.randn(1, 4, 4)
+        text = torch.randn(1, 333, 4)
+        return self.transformer(hidden, text).mean() * 0.0 + sum(parameter.sum() for parameter in self.injector.parameters()).pow(2)
 
     def backward_step(self, batch: object) -> dict[str, float]:
         self.optimizer.zero_grad(set_to_none=True)
@@ -142,7 +159,6 @@ def _manifest(path: Path, rows: int) -> Path:
         "source_split",
         "pilot_split",
         "formal_role",
-        "prompt_embed_seq_len",
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -150,7 +166,7 @@ def _manifest(path: Path, rows: int) -> Path:
         for index in range(rows):
             neg = index % 2 == 1
             cache_path = path.parent / f"{'neg' if neg else 'pos'}-{index}.pt"
-            cache_path.write_bytes(b"cache")
+            torch.save({"prompt_embeds": torch.zeros(1, 333, 4)}, cache_path)
             writer.writerow(
                 {
                     "sample_id": str(index),
@@ -168,7 +184,6 @@ def _manifest(path: Path, rows: int) -> Path:
                     "source_split": "train",
                     "pilot_split": "train",
                     "formal_role": "train",
-                    "prompt_embed_seq_len": "333",
                 }
             )
     return path
@@ -227,6 +242,7 @@ def test_real_runner_uses_load_sd3_pipeline_and_mask_bank(tmp_path: Path) -> Non
     runner.run()
     assert called["loader"] == 1
     assert len(runner.mask_bank_sha) == 64
+    assert runner.prompt_length_gate["REAL_T5_PROMPT_LENGTH_GATE"] == "PASS"
 
 
 def test_real_runner_uses_1980_train_cache_and_first1000_schedule(tmp_path: Path) -> None:
@@ -262,6 +278,13 @@ def test_real_eval128_64_64_and_step0(tmp_path: Path) -> None:
     assert rows[0]["step"] == "0"
     assert rows[0]["positive_count"] == "64"
     assert rows[0]["negative_count"] == "64"
+
+
+def test_r0_eval_diagnostic_not_zero(tmp_path: Path) -> None:
+    _runner(tmp_path, arm="r0").run()
+    rows = list(csv.DictReader((tmp_path / "r0" / "eval_metrics.csv").open(encoding="utf-8")))
+    assert float(rows[0]["raal_eval_loss_positive"]) > 0.0
+    assert float(rows[0]["inside_mass_positive"]) > 0.0
 
 
 def test_real_checkpoint_adapter_only(tmp_path: Path) -> None:
@@ -310,6 +333,46 @@ def test_base_hash_unchanged_status(tmp_path: Path) -> None:
     _runner(tmp_path).run()
     status = (tmp_path / "r1" / "raal_pilot_status.md").read_text(encoding="utf-8")
     assert "BASE_HASH_GATE=PASS" in status
+    assert "OOM_COUNT=0" in status
+    assert "NAN_INF_COUNT=0" in status
+    assert "RAAL_GRAD_CONTRIBUTION_TO_RGDA=PASS" in status
+    assert "RAAL_DIAGNOSTIC_RNG_PRESERVED=PASS" in status
+
+
+def test_prompt_cache_length_gate_reads_tensor(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    with runner.train_cache_manifest.open(encoding="utf-8") as handle:
+        cache_path = Path(next(csv.DictReader(handle))["cache_path"])
+    torch.save({"prompt_embeds": torch.zeros(1, 332, 4)}, cache_path)
+    with pytest.raises(ValueError, match="T5_MASK_BANK_LENGTH_GATE"):
+        runner.run()
+
+
+def test_seed_initialization_initial_rgda_hash_identity(tmp_path: Path) -> None:
+    r0 = _runner(tmp_path / "r0seed", arm="r0")
+    r1 = _runner(tmp_path / "r1seed", arm="r1")
+    r0.run()
+    r1.run()
+    assert r0.initial_rgda_hash == r1.initial_rgda_hash
+
+
+def test_runtime_status_not_hardcoded_zero(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+
+    class NoisyTrainer(FakeTrainer):
+        @property
+        def oom_count(self) -> int:
+            return 2
+
+        @property
+        def nan_inf_count(self) -> int:
+            return 1
+
+    runner.trainer_factory = lambda arm_name, config, bank: NoisyTrainer(arm_name, config, bank)
+    runner.run()
+    status = (tmp_path / "r1" / "raal_pilot_status.md").read_text(encoding="utf-8")
+    assert "OOM_COUNT=2" in status
+    assert "NAN_INF_COUNT=1" in status
 
 
 def test_cross_arm_gate_pass(tmp_path: Path) -> None:
@@ -321,6 +384,8 @@ def test_cross_arm_gate_pass(tmp_path: Path) -> None:
     _write_eval(r1 / "eval_metrics.csv", "1.0", "0.5", "1.0")
     _write_train(r0 / "train_metrics.csv")
     _write_train(r1 / "train_metrics.csv")
+    _write_status(r0 / "raal_pilot_status.md")
+    _write_status(r1 / "raal_pilot_status.md")
     assert compare_raal_pilot_arms(r0, r1)["RAAL_PILOT_GATE"] == "PASS"
 
 
@@ -333,6 +398,8 @@ def test_cross_arm_gate_a_fail(tmp_path: Path) -> None:
     _write_eval(r1 / "eval_metrics.csv", "1.0", "0.95", "1.0")
     _write_train(r0 / "train_metrics.csv")
     _write_train(r1 / "train_metrics.csv")
+    _write_status(r0 / "raal_pilot_status.md")
+    _write_status(r1 / "raal_pilot_status.md")
     assert compare_raal_pilot_arms(r0, r1)["GATE_A"] == "FAIL"
 
 
@@ -345,6 +412,8 @@ def test_cross_arm_gate_b_fail(tmp_path: Path) -> None:
     _write_eval(r1 / "eval_metrics.csv", "1.0", "0.5", "1.0")
     _write_train(r0 / "train_metrics.csv")
     _write_train(r1 / "train_metrics.csv")
+    _write_status(r0 / "raal_pilot_status.md")
+    _write_status(r1 / "raal_pilot_status.md")
     assert compare_raal_pilot_arms(r0, r1)["GATE_B"] == "FAIL"
 
 
@@ -357,7 +426,56 @@ def test_cross_arm_gate_c_fail(tmp_path: Path) -> None:
     _write_eval(r1 / "eval_metrics.csv", "1.0", "0.5", "1.2")
     _write_train(r0 / "train_metrics.csv")
     _write_train(r1 / "train_metrics.csv")
+    _write_status(r0 / "raal_pilot_status.md")
+    _write_status(r1 / "raal_pilot_status.md")
     assert compare_raal_pilot_arms(r0, r1)["GATE_C"] == "FAIL"
+
+
+def test_stability_gate_fails_on_oom(tmp_path: Path) -> None:
+    r0, r1 = _comparison_dirs(tmp_path)
+    _write_status(r1 / "raal_pilot_status.md", oom="1")
+    assert compare_raal_pilot_arms(r0, r1)["STABILITY_GATE"] == "FAIL"
+
+
+def test_stability_gate_fails_on_initial_hash_mismatch(tmp_path: Path) -> None:
+    r0, r1 = _comparison_dirs(tmp_path)
+    _write_status(r1 / "raal_pilot_status.md", initial="other")
+    assert compare_raal_pilot_arms(r0, r1)["STABILITY_GATE"] == "FAIL"
+
+
+def test_stability_gate_fails_on_source_sequence_mismatch(tmp_path: Path) -> None:
+    r0, r1 = _comparison_dirs(tmp_path)
+    _write_status(r1 / "raal_pilot_status.md", source="other")
+    assert compare_raal_pilot_arms(r0, r1)["STABILITY_GATE"] == "FAIL"
+
+
+def test_stability_gate_fails_on_reload_failure(tmp_path: Path) -> None:
+    r0, r1 = _comparison_dirs(tmp_path)
+    _write_status(r1 / "raal_pilot_status.md", reload_gate="FAIL")
+    assert compare_raal_pilot_arms(r0, r1)["STABILITY_GATE"] == "FAIL"
+
+
+def test_stability_gate_fails_on_negative_raal_failure(tmp_path: Path) -> None:
+    r0, r1 = _comparison_dirs(tmp_path)
+    _write_status(r1 / "raal_pilot_status.md", negative_gate="FAIL")
+    assert compare_raal_pilot_arms(r0, r1)["STABILITY_GATE"] == "FAIL"
+
+
+def test_stability_gate_fails_on_gradient_diagnostic_failure(tmp_path: Path) -> None:
+    r0, r1 = _comparison_dirs(tmp_path)
+    _write_status(r1 / "raal_pilot_status.md", grad_gate="FAIL")
+    assert compare_raal_pilot_arms(r0, r1)["STABILITY_GATE"] == "FAIL"
+
+
+def test_stability_gate_fails_on_rng_diagnostic_failure(tmp_path: Path) -> None:
+    r0, r1 = _comparison_dirs(tmp_path)
+    _write_status(r1 / "raal_pilot_status.md", rng_gate="FAIL")
+    assert compare_raal_pilot_arms(r0, r1)["STABILITY_GATE"] == "FAIL"
+
+
+def test_22d_report_declares_no_gpu() -> None:
+    text = Path("reports/22D_RAAL_PILOT_FINAL_CODE_READY.md").read_text(encoding="utf-8")
+    assert "GPU_USED=NO" in text
 
 
 def _write_eval(path: Path, raal0: str, raal1000: str, flow1000: str) -> None:
@@ -375,3 +493,48 @@ def _write_train(path: Path) -> None:
         writer.writeheader()
         for step in range(1, 1001):
             writer.writerow({"step": str(step)})
+
+
+def _write_status(
+    path: Path,
+    *,
+    oom: str = "0",
+    initial: str = "same",
+    source: str = "schedule",
+    reload_gate: str = "PASS",
+    negative_gate: str = "PASS",
+    grad_gate: str = "PASS",
+    rng_gate: str = "PASS",
+) -> None:
+    path.write_text(
+        "\n".join(
+            [
+                "COMPLETED=1000",
+                f"INITIAL_RGDA_HASH={initial}",
+                f"SOURCE_SEQUENCE_SHA256={source}",
+                f"OOM_COUNT={oom}",
+                "NAN_INF_COUNT=0",
+                "BASE_HASH_GATE=PASS",
+                f"CHECKPOINT_RELOAD_GATE={reload_gate}",
+                f"NEGATIVE_RAAL_ZERO_GATE={negative_gate}",
+                f"RAAL_GRAD_CONTRIBUTION_TO_RGDA={grad_gate}",
+                f"RAAL_DIAGNOSTIC_RNG_PRESERVED={rng_gate}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _comparison_dirs(tmp_path: Path) -> tuple[Path, Path]:
+    r0 = tmp_path / "r0"
+    r1 = tmp_path / "r1"
+    r0.mkdir()
+    r1.mkdir()
+    _write_eval(r0 / "eval_metrics.csv", "1.0", "0.8", "1.0")
+    _write_eval(r1 / "eval_metrics.csv", "1.0", "0.5", "1.0")
+    _write_train(r0 / "train_metrics.csv")
+    _write_train(r1 / "train_metrics.csv")
+    _write_status(r0 / "raal_pilot_status.md")
+    _write_status(r1 / "raal_pilot_status.md")
+    return r0, r1

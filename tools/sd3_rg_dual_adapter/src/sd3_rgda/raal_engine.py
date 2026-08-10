@@ -105,6 +105,8 @@ class RealSD3RGDARAALTrainer(RealSD3RGDATrainer):
             "outside_attention_mass": float(collector.stats.outside_mass.detach().cpu()) if collector.stats.outside_mass is not None else 0.0,
             "concentration_ratio": float(collector.stats.concentration_ratio.detach().cpu()) if collector.stats.concentration_ratio is not None else 0.0,
         }
+        for layer_index, count in collector.stats.layer_call_counts.items():
+            metrics[f"layer_{layer_index}_calls"] = float(count)
         return RAALLossComponents(flow_loss, raal_loss, weighted_raal_loss, total_loss, metrics)
 
     def forward_loss(self, batch: Any) -> torch.Tensor:

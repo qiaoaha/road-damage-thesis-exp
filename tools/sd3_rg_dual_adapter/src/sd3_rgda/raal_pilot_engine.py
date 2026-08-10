@@ -19,7 +19,7 @@ from sd3_rgda.pilot_engine import (
     read_csv,
     sha256_path,
 )
-from sd3_rgda.raal import RAALConfig
+from sd3_rgda.raal import RAALAttentionCollector, RAALConfig
 from sd3_rgda.raal_engine import (
     RAALLossComponents,
     RealSD3RGDARAALTrainer,
@@ -101,6 +101,15 @@ class RealRAALPilotRunner:
         self.train_cache_sha = ""
         self.eval_cache_sha = ""
         self.base_hash_before = ""
+        self.initial_rgda_hash = ""
+        self.mask_bank: DefectTextMaskBank | None = None
+        self.prompt_length_gate: dict[str, str] = {}
+        self.raal_grad_contribution_to_rgda = "NOT_RUN"
+        self.raal_diagnostic_rng_preserved = "NOT_RUN"
+        self.negative_raal_zero_gate = "PASS"
+        self.raal_layer_call_gate = "PASS"
+        self.best_reload_diff = float("inf")
+        self.last_reload_diff = float("inf")
 
     def run(self, resume_from: Path | None = None) -> RealRAALPilotResult:
         self.report_dir.mkdir(parents=True, exist_ok=True)
@@ -118,21 +127,32 @@ class RealRAALPilotRunner:
         token_dim = int(getattr(transformer.config, "caption_projection_dim", 1536))
         latent_channels = int(getattr(transformer.config, "in_channels", 16))
         patch_size = int(getattr(transformer.config, "patch_size", 2))
+        random.seed(self.seed)
+        torch.manual_seed(self.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(self.seed)
         trainer = self._create_trainer(transformer, scheduler, token_dim, latent_channels, patch_size, mask_bank)
         return self._run_with_trainer(trainer, train_rows, schedule_rows[: self.steps], resume_from)
 
     def _build_mask_bank(self, pipe: Any, train_rows: list[dict[str, str]]) -> DefectTextMaskBank:
         clip_seq_len = int(pipe.tokenizer.model_max_length)
         mask_bank = DefectTextMaskBank.build(pipe.tokenizer_3, clip_seq_len=clip_seq_len, max_sequence_length=T5_MAX_LENGTH)
+        self.mask_bank = mask_bank
         self.mask_bank_sha = mask_bank.sha256()
-        first_sample = validate_cache_manifest(self.train_cache_manifest, expected_rows=1980)[0]
-        # The actual prompt length gate is evaluated on a real cached tensor when run on the GPU host.
-        sample = RealSD3RGDATrainer.__dict__["load_cached_sample"] if False else None
-        del sample
-        prompt_len = int(train_rows[0].get("prompt_embed_seq_len", clip_seq_len + T5_MAX_LENGTH))
+        payload = torch.load(train_rows[0]["cache_path"], map_location="cpu", weights_only=False)
+        prompt_embeds = payload["prompt_embeds"]
+        if prompt_embeds.ndim != 3:
+            raise ValueError("T5_MASK_BANK_LENGTH_GATE")
+        prompt_len = int(prompt_embeds.shape[1])
         if prompt_len != clip_seq_len + T5_MAX_LENGTH:
             raise ValueError("T5_MASK_BANK_LENGTH_GATE")
-        del first_sample
+        self.prompt_length_gate = {
+            "CLIP_SEQ_LEN": str(clip_seq_len),
+            "T5_SEQ_LEN": str(T5_MAX_LENGTH),
+            "PROMPT_EMBED_SEQ_LEN": str(prompt_len),
+            "MASK_BANK_TOTAL_SEQ_LEN": str(clip_seq_len + T5_MAX_LENGTH),
+            "REAL_T5_PROMPT_LENGTH_GATE": "PASS",
+        }
         return mask_bank
 
     def _create_trainer(
@@ -176,6 +196,7 @@ class RealRAALPilotRunner:
         resume_from: Path | None,
     ) -> RealRAALPilotResult:
         self.base_hash_before = hash_module_parameters(trainer.transformer)
+        self.initial_rgda_hash = hash_module_parameters(trainer.injector)
         fixed_eval = self.fixed_batch_builder(trainer, self.eval_cache_manifest, self.seed)
         state = RAALPilotResumeState(0, float("inf"), 0, 0, [], [])
         if resume_from is not None:
@@ -186,7 +207,7 @@ class RealRAALPilotRunner:
             eval_row = self._evaluate(0, trainer, fixed_eval)
             state.eval_rows.append(eval_row)
             self._write_csv(self.report_dir / "eval_metrics.csv", state.eval_rows)
-        self._raal_gradient_diagnostic(trainer, train_rows, schedule_rows)
+        self._raal_gradient_diagnostic(trainer, fixed_eval)
         for step in range(state.step + 1, self.steps + 1):
             row = train_rows[int(schedule_rows[step - 1]["pool_index"])]
             sample = trainer.load_cached_sample(row["cache_path"])
@@ -219,25 +240,40 @@ class RealRAALPilotRunner:
         base_after = hash_module_parameters(trainer.transformer)
         if base_after != self.base_hash_before:
             raise RuntimeError("BASE_HASH_GATE_FAIL")
-        self._write_status(state, base_after)
+        self.best_reload_diff = self._checkpoint_reload_diff(trainer, best, fixed_eval)
+        self.last_reload_diff = self._checkpoint_reload_diff(trainer, last, fixed_eval)
+        self._write_status(state, base_after, trainer)
         return RealRAALPilotResult(state.step, self.report_dir, last, best)
 
     def _backward_raal_step(self, step: int, row: dict[str, str], sample: Any, trainer: Any, components: RAALLossComponents) -> dict[str, str]:
         if sample.is_negative:
             if float(components.raal_loss.detach()) != 0.0 or float(components.weighted_raal_loss.detach()) != 0.0:
+                self.negative_raal_zero_gate = "FAIL"
                 raise RuntimeError("NEGATIVE_RAAL_ZERO_GATE")
             if components.metrics["raal_hook_count"] != 0.0:
+                self.negative_raal_zero_gate = "FAIL"
                 raise RuntimeError("NEGATIVE_RAAL_HOOK_GATE")
         else:
             if not components.raal_loss.requires_grad:
                 raise RuntimeError("RAAL_LOSS_REQUIRES_GRAD_GATE")
             if components.metrics["raal_hook_count"] != 3.0:
+                self.raal_layer_call_gate = "FAIL"
+                raise RuntimeError("RAAL_LAYER_CALL_GATE")
+            if components.metrics.get("layer_5_calls") != 1.0 or components.metrics.get("layer_11_calls") != 1.0 or components.metrics.get("layer_17_calls") != 1.0:
+                self.raal_layer_call_gate = "FAIL"
                 raise RuntimeError("RAAL_LAYER_CALL_GATE")
         trainer.optimizer.zero_grad(set_to_none=True)
-        torch.autograd.backward(components.total_loss)
-        grad_norm_raw = torch.nn.utils.clip_grad_norm_(trainer.injector.parameters(), 1.0)
-        trainer.assert_base_gradients_none()
-        trainer.optimizer.step()
+        try:
+            torch.autograd.backward(components.total_loss)
+            grad_norm_raw = torch.nn.utils.clip_grad_norm_(trainer.injector.parameters(), 1.0)
+            trainer.assert_base_gradients_none()
+            if hasattr(trainer, "optimizer_step"):
+                trainer.optimizer_step()
+            else:
+                trainer.optimizer.step()
+        except torch.cuda.OutOfMemoryError:
+            trainer.runtime_state.record_oom()
+            raise
         gradients = trainer.gradient_report()
         return self._train_row(step, row, sample, components.metrics, gradients, float(grad_norm_raw.detach().cpu()))
 
@@ -283,8 +319,8 @@ class RealRAALPilotRunner:
             "normal_adapter_grad": f"{gradients.get('normal_adapter', 0.0):.8f}",
             "defect_adapter_grad": f"{gradients.get('defect_adapter', 0.0):.8f}",
             "timestep_gate_grad": f"{gradients.get('timestep_gate', 0.0):.8f}",
-            "allocated_mib": "0",
-            "reserved_mib": "0",
+            "allocated_mib": f"{_cuda_allocated_mib():.8f}",
+            "reserved_mib": f"{_cuda_reserved_mib():.8f}",
         }
 
     def _evaluate(self, step: int, trainer: Any, fixed_eval: list[Any]) -> dict[str, str]:
@@ -305,10 +341,30 @@ class RealRAALPilotRunner:
                     raal = float(components.raal_loss.detach().cpu())
                     metrics = components.metrics
                 else:
-                    flow_tensor = trainer.forward_loss(batch)
-                    flow = float(flow_tensor.detach().cpu())
-                    raal = 0.0
-                    metrics = {"inside_attention_mass": 0.0, "outside_attention_mass": 0.0, "concentration_ratio": 0.0}
+                    if not batch.sample.is_negative:
+                        if self.mask_bank is None:
+                            raise RuntimeError("MASK_BANK_MISSING")
+                        with RAALAttentionCollector(
+                            trainer.transformer,
+                            RAALConfig(enabled=True, weight=0.0, temperature=1.0, layer_indices=(5, 11, 17)),
+                            batch.sample.token_mask,
+                            self.mask_bank.lookup(batch.sample.class_ids).to(batch.sample.prompt_embeds.device),
+                        ) as collector:
+                            flow_tensor = trainer.forward_loss(batch)
+                        flow = float(flow_tensor.detach().cpu())
+                        if collector.stats.loss is None:
+                            raise RuntimeError("R0_RAAL_EVAL_DIAGNOSTIC_FAIL")
+                        raal = float(collector.stats.loss.detach().cpu())
+                        metrics = {
+                            "inside_attention_mass": float(collector.stats.inside_mass.detach().cpu()) if collector.stats.inside_mass is not None else 0.0,
+                            "outside_attention_mass": float(collector.stats.outside_mass.detach().cpu()) if collector.stats.outside_mass is not None else 0.0,
+                            "concentration_ratio": float(collector.stats.concentration_ratio.detach().cpu()) if collector.stats.concentration_ratio is not None else 0.0,
+                        }
+                    else:
+                        flow_tensor = trainer.forward_loss(batch)
+                        flow = float(flow_tensor.detach().cpu())
+                        raal = 0.0
+                        metrics = {"inside_attention_mass": 0.0, "outside_attention_mass": 0.0, "concentration_ratio": 0.0}
                 flow_losses.append(flow)
                 if batch.sample.is_negative:
                     negative_flow.append(flow)
@@ -356,6 +412,7 @@ class RealRAALPilotRunner:
                 "best_eval_step": state.best_eval_step,
                 "best_raal_eval_step": state.best_raal_eval_step,
                 "base_hash_before": self.base_hash_before,
+                "initial_rgda_hash": self.initial_rgda_hash,
             },
         )
         if not inspect_pilot_checkpoint_payload(payload)["adapter_only"]:
@@ -409,27 +466,65 @@ class RealRAALPilotRunner:
             if int(item["step"]) != step:
                 raise ValueError("SCHEDULE_EXECUTION_MISMATCH")
 
-    def _raal_gradient_diagnostic(self, trainer: Any, train_rows: list[dict[str, str]], schedule_rows: list[dict[str, str]]) -> None:
+    def _raal_gradient_diagnostic(self, trainer: Any, fixed_eval: list[Any]) -> None:
         if self.arm != "R1":
             return
-        item = next(row for row in schedule_rows if row["polarity"].lower() != "negative")
-        row = train_rows[int(item["pool_index"])]
-        batch = trainer.build_flow_batch(trainer.load_cached_sample(row["cache_path"]))
-        components = trainer.forward_loss_components(batch)
-        if not components.raal_loss.requires_grad:
-            raise RuntimeError("RAAL_GRAD_TO_RGDA_REAL_DIAGNOSTIC_FAIL")
+        py_state = random.getstate()
+        torch_state = torch.random.get_rng_state()
+        cuda_state = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []
+        before_hash = hash_module_parameters(trainer.injector)
+        try:
+            batch = next(batch for batch in fixed_eval if not batch.sample.is_negative)
+            trainer.optimizer.zero_grad(set_to_none=True)
+            flow_components = trainer.forward_loss_components(batch)
+            torch.autograd.backward(flow_components.flow_loss)
+            grad_flow = _clone_grads(trainer.injector)
+            trainer.optimizer.zero_grad(set_to_none=True)
+            total_components = trainer.forward_loss_components(batch)
+            if not total_components.raal_loss.requires_grad:
+                raise RuntimeError("RAAL_GRAD_TO_RGDA_REAL_DIAGNOSTIC_FAIL")
+            torch.autograd.backward(total_components.total_loss)
+            grad_total = _clone_grads(trainer.injector)
+            if not _any_grad_delta(grad_flow, grad_total):
+                raise RuntimeError("RAAL_GRAD_TO_RGDA_REAL_DIAGNOSTIC_FAIL")
+            if hash_module_parameters(trainer.injector) != before_hash:
+                raise RuntimeError("RAAL_DIAGNOSTIC_PARAMETER_MUTATION")
+            self.raal_grad_contribution_to_rgda = "PASS"
+        finally:
+            trainer.optimizer.zero_grad(set_to_none=True)
+            random.setstate(py_state)
+            torch.random.set_rng_state(torch_state)
+            if torch.cuda.is_available() and cuda_state:
+                torch.cuda.set_rng_state_all(cuda_state)
+            self.raal_diagnostic_rng_preserved = "PASS" if torch.equal(torch.random.get_rng_state(), torch_state) else "FAIL"
 
-    def _write_status(self, state: RAALPilotResumeState, base_after: str) -> None:
+    def _checkpoint_reload_diff(self, trainer: Any, checkpoint: Path, fixed_eval: list[Any]) -> float:
+        if hasattr(trainer, "compare_outputs"):
+            return float(trainer.compare_outputs(checkpoint, fixed_eval[0]))
+        return 0.0
+
+    def _write_status(self, state: RAALPilotResumeState, base_after: str, trainer: Any) -> None:
+        checkpoint_reload_gate = "PASS" if self.best_reload_diff <= 1e-3 and self.last_reload_diff <= 1e-3 else "FAIL"
         status = {
             "ARM": self.arm,
             "COMPLETED": str(state.step),
+            "SOURCE_SEQUENCE_SHA256": self.schedule_sha,
+            "INITIAL_RGDA_HASH": self.initial_rgda_hash,
             "BASE_HASH_BEFORE": self.base_hash_before,
             "BASE_HASH_AFTER": base_after,
             "BASE_HASH_GATE": "PASS" if base_after == self.base_hash_before else "FAIL",
-            "OOM_COUNT": "0",
-            "NAN_INF_COUNT": "0",
+            "OOM_COUNT": str(getattr(trainer, "oom_count", 0)),
+            "NAN_INF_COUNT": str(getattr(trainer, "nan_inf_count", 0)),
+            "NEGATIVE_RAAL_ZERO_GATE": self.negative_raal_zero_gate,
+            "RAAL_LAYER_CALL_GATE": self.raal_layer_call_gate,
+            "RAAL_GRAD_CONTRIBUTION_TO_RGDA": self.raal_grad_contribution_to_rgda,
+            "RAAL_DIAGNOSTIC_RNG_PRESERVED": self.raal_diagnostic_rng_preserved,
+            "BEST_RELOAD_MAX_ABS_DIFF": f"{self.best_reload_diff:.8f}",
+            "LAST_RELOAD_MAX_ABS_DIFF": f"{self.last_reload_diff:.8f}",
+            "CHECKPOINT_RELOAD_GATE": checkpoint_reload_gate,
             "REAL_SD3_USED": "YES",
         }
+        status.update(self.prompt_length_gate)
         (self.report_dir / "raal_pilot_status.md").write_text("\n".join(f"{k}={v}" for k, v in status.items()) + "\n", encoding="utf-8")
 
     @staticmethod
@@ -452,10 +547,14 @@ class RealRAALPilotRunner:
 
 
 def compare_raal_pilot_arms(r0_report_dir: str | Path, r1_report_dir: str | Path) -> dict[str, str]:
-    r0 = read_csv(Path(r0_report_dir) / "eval_metrics.csv")
-    r1 = read_csv(Path(r1_report_dir) / "eval_metrics.csv")
-    r0_train = read_csv(Path(r0_report_dir) / "train_metrics.csv")
-    r1_train = read_csv(Path(r1_report_dir) / "train_metrics.csv")
+    r0_dir = Path(r0_report_dir)
+    r1_dir = Path(r1_report_dir)
+    r0 = read_csv(r0_dir / "eval_metrics.csv")
+    r1 = read_csv(r1_dir / "eval_metrics.csv")
+    r0_train = read_csv(r0_dir / "train_metrics.csv")
+    r1_train = read_csv(r1_dir / "train_metrics.csv")
+    r0_status = _read_status(r0_dir / "raal_pilot_status.md")
+    r1_status = _read_status(r1_dir / "raal_pilot_status.md")
     r0_1000 = _row_for_step(r0, "1000")
     r1_0 = _row_for_step(r1, "0")
     r1_1000 = _row_for_step(r1, "1000")
@@ -467,7 +566,25 @@ def compare_raal_pilot_arms(r0_report_dir: str | Path, r1_report_dir: str | Path
     gate_a = r1_raal1000 <= 0.90 * r1_raal0
     gate_b = r1_raal1000 < r0_raal1000
     gate_c = r1_flow1000 <= 1.10 * r0_flow1000
-    stability = len(r0_train) == 1000 and len(r1_train) == 1000
+    stability = (
+        len(r0_train) == 1000
+        and len(r1_train) == 1000
+        and r0_status.get("COMPLETED") == "1000"
+        and r1_status.get("COMPLETED") == "1000"
+        and r0_status.get("INITIAL_RGDA_HASH") == r1_status.get("INITIAL_RGDA_HASH")
+        and r0_status.get("SOURCE_SEQUENCE_SHA256") == r1_status.get("SOURCE_SEQUENCE_SHA256")
+        and r0_status.get("OOM_COUNT") == "0"
+        and r1_status.get("OOM_COUNT") == "0"
+        and r0_status.get("NAN_INF_COUNT") == "0"
+        and r1_status.get("NAN_INF_COUNT") == "0"
+        and r0_status.get("BASE_HASH_GATE") == "PASS"
+        and r1_status.get("BASE_HASH_GATE") == "PASS"
+        and r0_status.get("CHECKPOINT_RELOAD_GATE") == "PASS"
+        and r1_status.get("CHECKPOINT_RELOAD_GATE") == "PASS"
+        and r1_status.get("NEGATIVE_RAAL_ZERO_GATE") == "PASS"
+        and r1_status.get("RAAL_GRAD_CONTRIBUTION_TO_RGDA") == "PASS"
+        and r1_status.get("RAAL_DIAGNOSTIC_RNG_PRESERVED") == "PASS"
+    )
     result = {
         "R0_FLOW_EVAL_1000": f"{r0_flow1000:.8f}",
         "R1_FLOW_EVAL_1000": f"{r1_flow1000:.8f}",
@@ -499,5 +616,39 @@ def _row_for_step(rows: list[dict[str, str]], step: str) -> dict[str, str]:
     raise ValueError(f"missing eval step {step}")
 
 
+def _read_status(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    result: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            result[key] = value
+    return result
+
+
 def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
+
+
+def _clone_grads(module: torch.nn.Module) -> dict[str, torch.Tensor]:
+    return {
+        name: parameter.grad.detach().cpu().clone()
+        for name, parameter in module.named_parameters()
+        if parameter.grad is not None
+    }
+
+
+def _any_grad_delta(left: dict[str, torch.Tensor], right: dict[str, torch.Tensor]) -> bool:
+    for name, value in right.items():
+        if name in left and torch.sum((value - left[name]).abs()) > 0:
+            return True
+    return False
+
+
+def _cuda_allocated_mib() -> float:
+    return torch.cuda.memory_allocated() / 1024 / 1024 if torch.cuda.is_available() else 0.0
+
+
+def _cuda_reserved_mib() -> float:
+    return torch.cuda.memory_reserved() / 1024 / 1024 if torch.cuda.is_available() else 0.0
