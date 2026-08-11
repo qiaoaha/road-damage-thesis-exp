@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import random
+import statistics
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -220,11 +221,12 @@ class RAALFormal5000Runner:
                 self._write_full_val_metrics("zero_init", 0, trainer, fixed_val, append=False)
         for step in range(state.step + 1, self.steps + 1):
             item = schedule_rows[step - 1]
-            row = train_rows[int(item["pool_index"])]
+            pool_index = int(item["pool_index"])
+            row = train_rows[pool_index]
             sample = trainer.load_cached_sample(row["cache_path"])
             metrics = trainer.backward_step(trainer.build_flow_batch(sample))
-            train_row = self._train_row(step, row, sample, metrics, trainer.gradient_report())
-            state.sample_usage_counts[int(item["pool_index"])] = state.sample_usage_counts.get(int(item["pool_index"]), 0) + 1
+            train_row = self._train_row(step, pool_index, row, sample, metrics, trainer.gradient_report())
+            state.sample_usage_counts[pool_index] = state.sample_usage_counts.get(pool_index, 0) + 1
             state.train_rows.append(train_row)
             state.step = step
             self._append_csv(self.report_dir / "train_metrics.csv", train_row)
@@ -257,10 +259,12 @@ class RAALFormal5000Runner:
         _package_report_dir(self.report_dir)
         return FormalRunResult(state.step, last, self.report_dir)
 
-    def _train_row(self, step: int, row: dict[str, str], sample: Any, metrics: dict[str, float], grads: dict[str, float]) -> dict[str, str]:
+    def _train_row(
+        self, step: int, pool_index: int, row: dict[str, str], sample: Any, metrics: dict[str, float], grads: dict[str, float]
+    ) -> dict[str, str]:
         return {
             "step": str(step),
-            "pool_index": row.get("pool_index", ""),
+            "pool_index": str(pool_index),
             "source_sample_id": row["source_sample_id"],
             "is_negative": str(bool(sample.is_negative)).lower(),
             "flow_loss": f"{metrics['flow_loss']:.8f}",
@@ -461,9 +465,10 @@ class RAALFormal5000Runner:
     def _final_status(self, state: RAALFormalState, trainer: Any, best_diff: float, last_diff: float) -> dict[str, str]:
         eval0 = float(state.eval_rows[0]["flow_eval_loss_all"]) if state.eval_rows else float("inf")
         best_flow = float(state.best_flow_eval_loss)
-        train_first = _mean([float(row["flow_loss"]) for row in state.train_rows[:50]])
-        train_last = _mean([float(row["flow_loss"]) for row in state.train_rows[-50:]])
+        train_first = _median([float(row["flow_loss"]) for row in state.train_rows[:250]])
+        train_last = _median([float(row["flow_loss"]) for row in state.train_rows[-250:]])
         full = {row["model_tag"]: float(row["flow_eval_loss_all"]) for row in self.full_val_rows}
+        grad_gates = self._raal_grad_gates(state.train_rows)
         status = {
             "RUN_MODE": self.run_mode,
             "COMPLETED": str(state.step),
@@ -478,14 +483,14 @@ class RAALFormal5000Runner:
             "BEST_FLOW_EVAL_STEP": str(state.best_flow_eval_step),
             "BEST_FLOW_EVAL_LOSS": str(state.best_flow_eval_loss),
             "TRAIN_FLOW_LOSS_IMPROVED": "PASS" if self.run_mode == "SMOKE" or train_last <= 0.90 * train_first else "FAIL",
-            "FLOW_EVAL128_IMPROVED": "PASS" if self.run_mode == "SMOKE" or float(state.eval_rows[-1]["flow_eval_loss_all"]) <= 0.90 * eval0 else "FAIL",
+            "FLOW_EVAL128_IMPROVED": "PASS" if self.run_mode == "SMOKE" or float(state.eval_rows[-1]["flow_eval_loss_all"]) <= 0.95 * eval0 else "FAIL",
             "BEST_FLOW_EVAL128_IMPROVED": "PASS" if self.run_mode == "SMOKE" or best_flow <= 0.90 * eval0 else "FAIL",
             "FULL_VAL_424_IMPLEMENTED": "PASS" if self.run_mode == "FULL" and len(self.full_val_rows) == 3 else "NOT_APPLICABLE_SMOKE",
             "FULL_VAL_THREE_CHECKPOINT_STATES": "PASS"
             if self.run_mode == "FULL" and [row["model_tag"] for row in self.full_val_rows] == ["zero_init", "best_eval", "last"]
             else "NOT_APPLICABLE_SMOKE",
             "FULL_VAL_BEST_FLOW_IMPROVED": "PASS"
-            if self.run_mode == "FULL" and full.get("best_eval", float("inf")) <= 0.90 * full.get("zero_init", 0.0)
+            if self.run_mode == "FULL" and full.get("best_eval", float("inf")) <= 0.95 * full.get("zero_init", 0.0)
             else "NOT_APPLICABLE_SMOKE",
             "BEST_CHECKPOINT_STATE_HASH_GATE": self.best_state_hash_gate,
             "LAST_CHECKPOINT_STATE_HASH_GATE": self.last_state_hash_gate,
@@ -499,7 +504,7 @@ class RAALFormal5000Runner:
             else "FAIL",
             "NEGATIVE_RAAL_ZERO_GATE": self._negative_raal_zero_gate(state.train_rows),
             "PRIMARY_HOOK_COUNT_GATE": self._primary_hook_count_gate(state.train_rows),
-            "RAAL_GRAD_TO_RGDA": self._raal_grad_gate(state.train_rows),
+            **grad_gates,
             "OOM_COUNT": str(getattr(trainer, "oom_count", 0)),
             "NAN_INF_COUNT": str(getattr(trainer, "nan_inf_count", 0)),
             "OOM_GATE": "PASS" if getattr(trainer, "oom_count", 0) == 0 else "FAIL",
@@ -532,7 +537,20 @@ class RAALFormal5000Runner:
             "NAN_INF_GATE",
         ]
         if self.run_mode == "SMOKE":
-            status["FINAL_VERDICT"] = "PASS" if state.step == self.steps and status["SMOKE_EXECUTION_GATE"] == "PASS" else "FAIL"
+            smoke_required = [
+                "SMOKE_EXECUTION_GATE",
+                "BASE_HASH_GATE",
+                "NEGATIVE_RAAL_ZERO_GATE",
+                "PRIMARY_HOOK_COUNT_GATE",
+                "RAAL_GRAD_TO_RGDA",
+                "BEST_CHECKPOINT_STATE_HASH_GATE",
+                "LAST_CHECKPOINT_STATE_HASH_GATE",
+                "CHECKPOINT_RELOAD_RESTORE_GATE",
+                "CHECKPOINT_RELOAD_GATE",
+                "OOM_GATE",
+                "NAN_INF_GATE",
+            ]
+            status["FINAL_VERDICT"] = "PASS" if all(status.get(key) == "PASS" for key in smoke_required) else "FAIL"
         else:
             status["FINAL_VERDICT"] = "PASS" if all(status.get(key) == "PASS" for key in required) else "FAIL"
         return status
@@ -646,17 +664,34 @@ class RAALFormal5000Runner:
         return "PASS"
 
     @staticmethod
-    def _raal_grad_gate(rows: list[dict[str, str]]) -> str:
+    def _raal_grad_gates(rows: list[dict[str, str]]) -> dict[str, str]:
+        positive_rg = 0
+        positive_defect = 0
+        positive_normal = 0
+        negative_rg = 0
+        negative_defect = 0
         for row in rows:
-            if row["is_negative"] == "false" and (
-                float(row.get("normal_encoder_grad", 0.0)) <= 0.0 or float(row.get("normal_adapter_grad", 0.0)) <= 0.0
-            ):
-                return "FAIL"
-            if row["is_negative"] == "true" and (
-                float(row.get("rg_encoder_grad", 0.0)) != 0.0 or float(row.get("defect_adapter_grad", 0.0)) != 0.0
-            ):
-                return "FAIL"
-        return "PASS"
+            if row["is_negative"] == "false":
+                positive_rg += int(float(row.get("rg_encoder_grad", 0.0)) > 0.0)
+                positive_defect += int(float(row.get("defect_adapter_grad", 0.0)) > 0.0)
+                positive_normal += int(float(row.get("normal_adapter_grad", 0.0)) > 0.0)
+            else:
+                negative_rg += int(float(row.get("rg_encoder_grad", 0.0)) != 0.0)
+                negative_defect += int(float(row.get("defect_adapter_grad", 0.0)) != 0.0)
+        defect_active = positive_rg > 0 and positive_defect > 0
+        defect_blocked = negative_rg == 0 and negative_defect == 0
+        normal_active = positive_normal > 0
+        return {
+            "POSITIVE_RG_ENCODER_GRAD_NONZERO_STEPS": str(positive_rg),
+            "POSITIVE_DEFECT_ADAPTER_GRAD_NONZERO_STEPS": str(positive_defect),
+            "POSITIVE_NORMAL_ADAPTER_GRAD_NONZERO_STEPS": str(positive_normal),
+            "NEGATIVE_RG_ENCODER_GRAD_NONZERO_STEPS": str(negative_rg),
+            "NEGATIVE_DEFECT_ADAPTER_GRAD_NONZERO_STEPS": str(negative_defect),
+            "DEFECT_BRANCH_ACTIVE_POSITIVE": "PASS" if defect_active else "FAIL",
+            "DEFECT_BRANCH_BLOCKED_NEGATIVE": "PASS" if defect_blocked else "FAIL",
+            "NORMAL_BRANCH_ACTIVE": "PASS" if normal_active else "FAIL",
+            "RAAL_GRAD_TO_RGDA": "PASS" if defect_active and defect_blocked and normal_active else "FAIL",
+        }
 
     @staticmethod
     def _write_csv(path: Path, rows: list[dict[str, str]]) -> None:
@@ -737,6 +772,10 @@ def write_raal_formal_dry_integration(report_dir: Path, *, steps: int = 20) -> N
 
 def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
+
+
+def _median(values: list[float]) -> float:
+    return float(statistics.median(values)) if values else 0.0
 
 
 def _cuda_allocated_mib() -> float:

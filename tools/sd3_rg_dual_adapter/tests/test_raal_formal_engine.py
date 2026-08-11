@@ -11,7 +11,11 @@ from torch import nn
 
 from sd3_rgda.pilot_engine import read_csv
 from sd3_rgda.raal import RAALConfig
-from sd3_rgda.raal_formal_engine import RAALFormal5000Runner, write_raal_formal_dry_integration
+from sd3_rgda.raal_formal_engine import (
+    RAALFormal5000Runner,
+    RAALFormalState,
+    write_raal_formal_dry_integration,
+)
 from sd3_rgda.raal_tokens import DefectTextMaskBank
 from sd3_rgda.real_sd3_engine import hash_module_parameters
 
@@ -465,3 +469,201 @@ def test_usage_exact_matches_schedule(tmp_path: Path) -> None:
     assert audit["STRATUM_USAGE_FAIR"] == "PASS"
     assert rows[0]["uses"] == rows[0]["expected_uses"] == "1"
     assert rows[2]["uses"] == rows[2]["expected_uses"] == "0"
+
+
+def test_train_metric_pool_index_comes_from_schedule(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    trainer = FakeTrainer(RAALConfig(), DefectTextMaskBank.build(Tokenizer3(), clip_seq_len=77))
+    row = read_csv(runner.train_cache_manifest)[0]
+    sample = FakeSample(False)
+    train_row = runner._train_row(1, 37, row, sample, trainer.backward_step(trainer.build_flow_batch(sample)), trainer.gradient_report())
+    assert train_row["pool_index"] == "37"
+
+
+def test_formal_flow_gates_match_legacy_thresholds(tmp_path: Path) -> None:
+    runner = _runner(tmp_path, steps=5000)
+    trainer = FakeTrainer(RAALConfig(), DefectTextMaskBank.build(Tokenizer3(), clip_seq_len=77))
+    runner.preflight_gates = {key: "PASS" for key in ("FORMAL_MANIFEST", "FORMAL_SCHEDULE", "FORMAL_CLEAN_PROXY", "FORMAL_CACHE")}
+    runner.usage_audit = {
+        "POSITIVE_NEGATIVE_BALANCE": "PASS",
+        "ALL_1980_TRAIN_IMAGES_USED": "PASS",
+        "STRATUM_USAGE_FAIR": "PASS",
+        "SAMPLE_USAGE_EXACT_GATE": "PASS",
+    }
+    runner.base_hash_before = hash_module_parameters(trainer.transformer)
+    runner.best_state_hash_gate = "PASS"
+    runner.last_state_hash_gate = "PASS"
+    runner.checkpoint_reload_restore_gate = "PASS"
+    runner.full_val_rows = [
+        {"model_tag": "zero_init", "flow_eval_loss_all": "1.00000000"},
+        {"model_tag": "best_eval", "flow_eval_loss_all": "0.95000000"},
+        {"model_tag": "last", "flow_eval_loss_all": "0.98000000"},
+    ]
+    train_rows = []
+    for index in range(500):
+        train_rows.append(
+            {
+                "is_negative": "false",
+                "flow_loss": "1.00000000" if index < 250 else "0.90000000",
+                "raal_loss": "0.10000000",
+                "raal_hook_count": "3",
+                "normal_adapter_grad": "0.1" if index == 0 else "0.0",
+                "rg_encoder_grad": "0.1" if index == 0 else "0.0",
+                "defect_adapter_grad": "0.1" if index == 0 else "0.0",
+            }
+        )
+    state = RAALFormalState(
+        step=5000,
+        best_flow_eval_loss=0.90,
+        best_flow_eval_step=250,
+        train_rows=train_rows,
+        eval_rows=[{"flow_eval_loss_all": "1.00000000"}, {"flow_eval_loss_all": "0.95000000"}],
+        sample_usage_counts={},
+    )
+    status = runner._final_status(state, trainer, 0.0, 0.0)
+    assert status["TRAIN_FLOW_LOSS_IMPROVED"] == "PASS"
+    assert status["FLOW_EVAL128_IMPROVED"] == "PASS"
+    assert status["BEST_FLOW_EVAL128_IMPROVED"] == "PASS"
+    assert status["FULL_VAL_BEST_FLOW_IMPROVED"] == "PASS"
+
+
+def test_raal_grad_gate_counts_positive_rg_and_defect_steps() -> None:
+    rows = [
+        {
+            "is_negative": "false",
+            "normal_adapter_grad": "0.1",
+            "rg_encoder_grad": "0.0",
+            "defect_adapter_grad": "0.1",
+        },
+        {
+            "is_negative": "false",
+            "normal_adapter_grad": "0.0",
+            "rg_encoder_grad": "0.2",
+            "defect_adapter_grad": "0.0",
+        },
+        {
+            "is_negative": "true",
+            "normal_adapter_grad": "0.0",
+            "rg_encoder_grad": "0.0",
+            "defect_adapter_grad": "0.0",
+        },
+    ]
+    gates = RAALFormal5000Runner._raal_grad_gates(rows)
+    assert gates["POSITIVE_RG_ENCODER_GRAD_NONZERO_STEPS"] == "1"
+    assert gates["POSITIVE_DEFECT_ADAPTER_GRAD_NONZERO_STEPS"] == "1"
+    assert gates["DEFECT_BRANCH_ACTIVE_POSITIVE"] == "PASS"
+    assert gates["DEFECT_BRANCH_BLOCKED_NEGATIVE"] == "PASS"
+    assert gates["RAAL_GRAD_TO_RGDA"] == "PASS"
+
+
+def test_raal_grad_gate_fails_for_negative_defect_or_rg_gradients() -> None:
+    rows = [
+        {
+            "is_negative": "false",
+            "normal_adapter_grad": "0.1",
+            "rg_encoder_grad": "0.1",
+            "defect_adapter_grad": "0.1",
+        },
+        {
+            "is_negative": "true",
+            "normal_adapter_grad": "0.0",
+            "rg_encoder_grad": "0.1",
+            "defect_adapter_grad": "0.0",
+        },
+    ]
+    gates = RAALFormal5000Runner._raal_grad_gates(rows)
+    assert gates["DEFECT_BRANCH_BLOCKED_NEGATIVE"] == "FAIL"
+    assert gates["RAAL_GRAD_TO_RGDA"] == "FAIL"
+
+
+def test_smoke_checkpoint_failure_makes_final_verdict_fail(tmp_path: Path) -> None:
+    runner = _runner(tmp_path, steps=2)
+    trainer = FakeTrainer(RAALConfig(), DefectTextMaskBank.build(Tokenizer3(), clip_seq_len=77))
+    runner.base_hash_before = hash_module_parameters(trainer.transformer)
+    runner.best_state_hash_gate = "FAIL"
+    runner.last_state_hash_gate = "PASS"
+    runner.checkpoint_reload_restore_gate = "PASS"
+    state = RAALFormalState(
+        step=2,
+        best_flow_eval_loss=1.0,
+        best_flow_eval_step=1,
+        train_rows=[
+            {
+                "is_negative": "false",
+                "flow_loss": "1.0",
+                "raal_loss": "0.1",
+                "raal_hook_count": "3",
+                "normal_adapter_grad": "0.1",
+                "rg_encoder_grad": "0.1",
+                "defect_adapter_grad": "0.1",
+            },
+            {
+                "is_negative": "true",
+                "flow_loss": "1.0",
+                "raal_loss": "0.0",
+                "raal_hook_count": "0",
+                "normal_adapter_grad": "0.0",
+                "rg_encoder_grad": "0.0",
+                "defect_adapter_grad": "0.0",
+            },
+        ],
+        eval_rows=[{"flow_eval_loss_all": "1.0"}],
+        sample_usage_counts={},
+    )
+    assert runner._final_status(state, trainer, 0.0, 0.0)["FINAL_VERDICT"] == "FAIL"
+
+
+def test_smoke_hook_failure_makes_final_verdict_fail(tmp_path: Path) -> None:
+    runner = _runner(tmp_path, steps=2)
+    trainer = FakeTrainer(RAALConfig(), DefectTextMaskBank.build(Tokenizer3(), clip_seq_len=77))
+    runner.base_hash_before = hash_module_parameters(trainer.transformer)
+    runner.best_state_hash_gate = "PASS"
+    runner.last_state_hash_gate = "PASS"
+    runner.checkpoint_reload_restore_gate = "PASS"
+    state = RAALFormalState(
+        step=2,
+        best_flow_eval_loss=1.0,
+        best_flow_eval_step=1,
+        train_rows=[
+            {
+                "is_negative": "false",
+                "flow_loss": "1.0",
+                "raal_loss": "0.1",
+                "raal_hook_count": "0",
+                "normal_adapter_grad": "0.1",
+                "rg_encoder_grad": "0.1",
+                "defect_adapter_grad": "0.1",
+            }
+        ],
+        eval_rows=[{"flow_eval_loss_all": "1.0"}],
+        sample_usage_counts={},
+    )
+    assert runner._final_status(state, trainer, 0.0, 0.0)["FINAL_VERDICT"] == "FAIL"
+
+
+def test_smoke_base_hash_failure_makes_final_verdict_fail(tmp_path: Path) -> None:
+    runner = _runner(tmp_path, steps=2)
+    trainer = FakeTrainer(RAALConfig(), DefectTextMaskBank.build(Tokenizer3(), clip_seq_len=77))
+    runner.base_hash_before = "not-the-live-transformer-hash"
+    runner.best_state_hash_gate = "PASS"
+    runner.last_state_hash_gate = "PASS"
+    runner.checkpoint_reload_restore_gate = "PASS"
+    state = RAALFormalState(
+        step=2,
+        best_flow_eval_loss=1.0,
+        best_flow_eval_step=1,
+        train_rows=[
+            {
+                "is_negative": "false",
+                "flow_loss": "1.0",
+                "raal_loss": "0.1",
+                "raal_hook_count": "3",
+                "normal_adapter_grad": "0.1",
+                "rg_encoder_grad": "0.1",
+                "defect_adapter_grad": "0.1",
+            }
+        ],
+        eval_rows=[{"flow_eval_loss_all": "1.0"}],
+        sample_usage_counts={},
+    )
+    assert runner._final_status(state, trainer, 0.0, 0.0)["FINAL_VERDICT"] == "FAIL"
