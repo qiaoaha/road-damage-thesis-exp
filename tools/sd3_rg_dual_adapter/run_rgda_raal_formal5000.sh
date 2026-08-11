@@ -9,6 +9,10 @@ resolve_python() {
     printf '%s\n' "${PYTHON}"
     return 0
   fi
+  if [ -x /root/autodl-tmp/road_damage_exp/envs/sd3_bgpaste_py311/bin/python3.11 ]; then
+    printf '%s\n' /root/autodl-tmp/road_damage_exp/envs/sd3_bgpaste_py311/bin/python3.11
+    return 0
+  fi
   if command -v python3.11 >/dev/null 2>&1; then
     command -v python3.11
     return 0
@@ -19,10 +23,6 @@ resolve_python() {
   fi
   if command -v python >/dev/null 2>&1; then
     command -v python
-    return 0
-  fi
-  if [ -x /root/autodl-tmp/road_damage_exp/envs/sd3_bgpaste_py311/bin/python3.11 ]; then
-    printf '%s\n' /root/autodl-tmp/road_damage_exp/envs/sd3_bgpaste_py311/bin/python3.11
     return 0
   fi
   echo "PYTHON_RESOLUTION=FAIL" >&2
@@ -47,12 +47,39 @@ export TOKENIZERS_PARALLELISM=false
 
 mkdir -p "${REPORT_DIR}"
 
+echo "PYTHON_EXECUTABLE=${PYTHON}"
+"${PYTHON}" - <<'PY'
+import torch
+import sys
+
+print(f"PYTHON_VERSION={sys.version.split()[0]}")
+print(f"TORCH_VERSION={torch.__version__}")
+print(f"TORCH_CUDA_VERSION={torch.version.cuda}")
+PY
+
 if [ "${RAAL_FORMAL_DRY_INTEGRATION:-0}" = "1" ]; then
   "${PYTHON}" "${ROOT}/scripts/train_rgda_raal_formal5000.py" \
     --report-dir "${REPORT_DIR}" \
     --dry-integration \
     --dry-steps "${DRY_STEPS:-20}"
 else
+  if [ -f "${ROOT}/DEPLOYED_COMMIT.txt" ]; then
+    echo "DEPLOYED_COMMIT=$(cat "${ROOT}/DEPLOYED_COMMIT.txt")"
+  fi
+  "${PYTHON}" - <<'PY'
+import torch
+
+if not torch.cuda.is_available():
+    raise SystemExit("GPU_ENV=FAIL:cuda_unavailable")
+if torch.cuda.device_count() < 1:
+    raise SystemExit("GPU_ENV=FAIL:no_device")
+name = torch.cuda.get_device_name(0)
+print(f"GPU_NAME={name}")
+print(f"GPU_COUNT={torch.cuda.device_count()}")
+if "5090" not in name:
+    raise SystemExit("GPU_ENV=FAIL:not_rtx5090")
+print("GPU_ENV=PASS")
+PY
   "${PYTHON}" "${ROOT}/scripts/train_rgda_raal_formal5000.py" \
     --model-path "${MODEL_PATH}" \
     --train-cache-manifest "${CACHE_ROOT}/train1980/cache_manifest.csv" \

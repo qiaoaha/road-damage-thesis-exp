@@ -9,9 +9,11 @@ import pytest
 import torch
 from torch import nn
 
+from sd3_rgda.pilot_engine import read_csv
 from sd3_rgda.raal import RAALConfig
 from sd3_rgda.raal_formal_engine import RAALFormal5000Runner, write_raal_formal_dry_integration
 from sd3_rgda.raal_tokens import DefectTextMaskBank
+from sd3_rgda.real_sd3_engine import hash_module_parameters
 
 
 class Tokenizer3:
@@ -76,6 +78,7 @@ class FakeTrainer:
         self.loaded: list[str] = []
         self.eval_mode_calls = 0
         self.train_mode_calls = 0
+        self.last_negative = False
 
     def load_cached_sample(self, cache_path: str) -> FakeSample:
         self.loaded.append(cache_path)
@@ -86,6 +89,7 @@ class FakeTrainer:
 
     def backward_step(self, batch: object) -> dict[str, float]:
         negative = bool(batch.sample.is_negative)
+        self.last_negative = negative
         value = sum(parameter.sum() for parameter in self.injector.parameters())
         flow = (value + 1.0).pow(2)
         raal = flow * 0.0 if negative else (value + 0.5).pow(2)
@@ -123,7 +127,11 @@ class FakeTrainer:
         )
 
     def gradient_report(self) -> dict[str, float]:
-        return {name: 0.1 for name in self.injector.trainable_modules()}
+        grads = {name: 0.1 for name in self.injector.trainable_modules()}
+        if self.last_negative:
+            grads["rg_encoder"] = 0.0
+            grads["defect_adapter"] = 0.0
+        return grads
 
     def compare_outputs(self, _checkpoint: Path, _batch: object) -> float:
         return 0.0
@@ -237,8 +245,8 @@ def _runner(tmp_path: Path, *, steps: int = 2) -> RAALFormal5000Runner:
         scheduler_preparer=lambda scheduler: scheduler,
         transformer_preparer=lambda _pipe: (FakeTransformer(), SimpleNamespace()),
         trainer_factory=lambda config, bank: FakeTrainer(config, bank),
-        fixed_batch_builder=lambda trainer, _manifest_path, _seed: [
-            trainer.build_flow_batch(FakeSample(index % 2 == 1)) for index in range(128)
+        fixed_batch_builder=lambda trainer, manifest_path, _seed: [
+            trainer.build_flow_batch(FakeSample(index % 2 == 1)) for index in range(424 if "val" in manifest_path.name else 128)
         ],
     )
     runner.expected_mask_bank_sha256 = DefectTextMaskBank.build(Tokenizer3(), clip_seq_len=77).sha256()
@@ -397,3 +405,63 @@ def test_raal_formal_checkpoint_state_sha_failure_controls_verdict(tmp_path: Pat
     diff = runner._checkpoint_reload_diff(trainer, result.checkpoint_path, [trainer.build_flow_batch(FakeSample(False))], "last")
     assert runner.last_state_hash_gate == "FAIL"
     assert diff == float("inf")
+
+
+def test_full_val_three_rows_and_424_batches(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    trainer = FakeTrainer(RAALConfig(), DefectTextMaskBank.build(Tokenizer3(), clip_seq_len=77))
+    batches = [trainer.build_flow_batch(FakeSample(index % 2 == 1)) for index in range(424)]
+    runner._write_full_val_metrics("zero_init", 0, trainer, batches, append=False)
+    runner._write_full_val_metrics("best_eval", 250, trainer, batches, append=True)
+    runner._write_full_val_metrics("last", 5000, trainer, batches, append=True)
+    rows = list(csv.DictReader((tmp_path / "report" / "full_val_metrics.csv").open(encoding="utf-8")))
+    assert [row["model_tag"] for row in rows] == ["zero_init", "best_eval", "last"]
+    assert [row["checkpoint_step"] for row in rows] == ["0", "250", "5000"]
+    assert all(row["positive_count"] == "212" and row["negative_count"] == "212" for row in rows)
+
+
+def test_smoke_does_not_build_val424(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    seen: list[str] = []
+    runner = _runner(tmp_path, steps=2)
+
+    def builder(trainer: FakeTrainer, manifest_path: Path, _seed: int) -> list[object]:
+        seen.append(manifest_path.name)
+        return [trainer.build_flow_batch(FakeSample(index % 2 == 1)) for index in range(128)]
+
+    runner.fixed_batch_builder = builder
+    runner.run()
+    assert seen == ["eval128.csv"]
+    assert not (tmp_path / "report" / "full_val_metrics.csv").exists()
+
+
+def test_full_val_best_uses_loaded_best_checkpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    result = _runner(tmp_path, steps=2).run()
+    best = tmp_path / "report" / "checkpoints" / "raal_formal5000" / "best_eval.pt"
+    trainer = FakeTrainer(RAALConfig(), DefectTextMaskBank.build(Tokenizer3(), clip_seq_len=77))
+    before = hash_module_parameters(trainer.injector)
+    loss = _runner(tmp_path / "fullval")._write_checkpoint_full_val(
+        "best_eval",
+        best,
+        2,
+        trainer,
+        [trainer.build_flow_batch(FakeSample(False)) for _ in range(424)],
+        append=False,
+    )
+    assert result.final_step == 2
+    assert loss > 0
+    assert hash_module_parameters(trainer.injector) == before
+
+
+def test_usage_exact_matches_schedule(tmp_path: Path) -> None:
+    runner = _runner(tmp_path, steps=2)
+    train_rows = read_csv(runner.train_cache_manifest)
+    schedule_rows = read_csv(runner.schedule_manifest)
+    audit = runner._usage_audit(train_rows, {0: 1, 1: 1}, schedule_rows)
+    runner._write_sample_usage(train_rows, {0: 1, 1: 1}, schedule_rows)
+    rows = list(csv.DictReader((tmp_path / "report" / "sample_usage.csv").open(encoding="utf-8")))
+    assert audit["SAMPLE_USAGE_EXACT_GATE"] == "PASS"
+    assert audit["STRATUM_USAGE_FAIR"] == "PASS"
+    assert rows[0]["uses"] == rows[0]["expected_uses"] == "1"
+    assert rows[2]["uses"] == rows[2]["expected_uses"] == "0"

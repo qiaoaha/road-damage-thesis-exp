@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import random
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -129,6 +130,7 @@ class RAALFormal5000Runner:
         self.best_state_hash_gate = "NOT_RUN"
         self.last_state_hash_gate = "NOT_RUN"
         self.checkpoint_reload_restore_gate = "NOT_RUN"
+        self.full_val_rows: list[dict[str, str]] = []
 
     @property
     def run_mode(self) -> str:
@@ -204,6 +206,7 @@ class RAALFormal5000Runner:
         self.base_hash_before = hash_module_parameters(trainer.transformer)
         self.initial_rgda_hash = hash_module_parameters(trainer.injector)
         fixed_eval = self.fixed_batch_builder(trainer, self.eval128_cache_manifest, self.seed)
+        fixed_val = self.fixed_batch_builder(trainer, self.val_cache_manifest, self.seed) if self.run_mode == "FULL" else []
         state = RAALFormalState(0, float("inf"), 0, [], [], {i: 0 for i in range(len(train_rows))})
         if resume_from is not None:
             state = self._load_resume(resume_from, trainer)
@@ -213,6 +216,8 @@ class RAALFormal5000Runner:
             eval_row = self._evaluate(0, trainer, fixed_eval)
             state.eval_rows.append(eval_row)
             self._write_csv(self.report_dir / "eval128_metrics.csv", state.eval_rows)
+            if self.run_mode == "FULL":
+                self._write_full_val_metrics("zero_init", 0, trainer, fixed_val, append=False)
         for step in range(state.step + 1, self.steps + 1):
             item = schedule_rows[step - 1]
             row = train_rows[int(item["pool_index"])]
@@ -241,7 +246,12 @@ class RAALFormal5000Runner:
             self._save_checkpoint(best, trainer, state)
         best_diff = self._checkpoint_reload_diff(trainer, best, fixed_eval, "best")
         last_diff = self._checkpoint_reload_diff(trainer, last, fixed_eval, "last")
+        if self.run_mode == "FULL":
+            self._write_checkpoint_full_val("best_eval", best, state.best_flow_eval_step, trainer, fixed_val, append=True)
+            self._write_checkpoint_full_val("last", last, self.steps, trainer, fixed_val, append=True)
+            self.full_val_rows = read_csv(self.report_dir / "full_val_metrics.csv")
         self.usage_audit = self._usage_audit(train_rows, state.sample_usage_counts, schedule_rows)
+        self._write_sample_usage(train_rows, state.sample_usage_counts, schedule_rows)
         final = self._final_status(state, trainer, best_diff, last_diff)
         _write_kv(self.report_dir / "RAAL_FORMAL_FINAL_STATUS.md", final)
         _package_report_dir(self.report_dir)
@@ -325,6 +335,33 @@ class RAALFormal5000Runner:
             "positive_count": str(len(flow_pos)),
             "negative_count": str(len(flow_neg)),
         }
+
+    def _write_full_val_metrics(self, tag: str, step: int, trainer: Any, batches: list[Any], *, append: bool) -> float:
+        row = self._evaluate(step, trainer, batches)
+        out_row = {"model_tag": tag, "checkpoint_step": str(step), **{key: value for key, value in row.items() if key != "step"}}
+        self._append_csv(self.report_dir / "full_val_metrics.csv", out_row, append=append)
+        return float(row["flow_eval_loss_all"])
+
+    def _write_checkpoint_full_val(
+        self, tag: str, checkpoint: Path, checkpoint_step: int, trainer: Any, batches: list[Any], *, append: bool
+    ) -> float:
+        payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        if payload.get("adapter_state_sha256") != _adapter_payload_sha256(payload["modules"]):
+            raise RuntimeError(f"RAAL_FORMAL_FULL_VAL_CHECKPOINT_SHA_FAIL:{tag}")
+        before_hash = hash_module_parameters(trainer.injector)
+        original_state = {
+            name: {key: value.detach().cpu().clone() for key, value in module.state_dict().items()}
+            for name, module in trainer.injector.trainable_modules().items()
+        }
+        try:
+            for name, module in trainer.injector.trainable_modules().items():
+                module.load_state_dict(payload["modules"][name])
+            return self._write_full_val_metrics(tag, checkpoint_step, trainer, batches, append=append)
+        finally:
+            for name, module in trainer.injector.trainable_modules().items():
+                module.load_state_dict(original_state[name])
+            if hash_module_parameters(trainer.injector) != before_hash:
+                raise RuntimeError("RAAL_FORMAL_FULL_VAL_RESTORE_HASH_CHANGED")
 
     def _save_checkpoint(self, path: Path, trainer: Any, state: RAALFormalState) -> None:
         payload = checkpoint_scope_payload(
@@ -422,7 +459,12 @@ class RAALFormal5000Runner:
         }
 
     def _final_status(self, state: RAALFormalState, trainer: Any, best_diff: float, last_diff: float) -> dict[str, str]:
-        return {
+        eval0 = float(state.eval_rows[0]["flow_eval_loss_all"]) if state.eval_rows else float("inf")
+        best_flow = float(state.best_flow_eval_loss)
+        train_first = _mean([float(row["flow_loss"]) for row in state.train_rows[:50]])
+        train_last = _mean([float(row["flow_loss"]) for row in state.train_rows[-50:]])
+        full = {row["model_tag"]: float(row["flow_eval_loss_all"]) for row in self.full_val_rows}
+        status = {
             "RUN_MODE": self.run_mode,
             "COMPLETED": str(state.step),
             "TRAIN_5000_STEPS": "PASS" if self.steps == 5000 and state.step == 5000 else "NOT_APPLICABLE_SMOKE",
@@ -435,6 +477,16 @@ class RAALFormal5000Runner:
             "BASE_HASH_GATE": "PASS" if hash_module_parameters(trainer.transformer) == self.base_hash_before else "FAIL",
             "BEST_FLOW_EVAL_STEP": str(state.best_flow_eval_step),
             "BEST_FLOW_EVAL_LOSS": str(state.best_flow_eval_loss),
+            "TRAIN_FLOW_LOSS_IMPROVED": "PASS" if self.run_mode == "SMOKE" or train_last <= 0.90 * train_first else "FAIL",
+            "FLOW_EVAL128_IMPROVED": "PASS" if self.run_mode == "SMOKE" or float(state.eval_rows[-1]["flow_eval_loss_all"]) <= 0.90 * eval0 else "FAIL",
+            "BEST_FLOW_EVAL128_IMPROVED": "PASS" if self.run_mode == "SMOKE" or best_flow <= 0.90 * eval0 else "FAIL",
+            "FULL_VAL_424_IMPLEMENTED": "PASS" if self.run_mode == "FULL" and len(self.full_val_rows) == 3 else "NOT_APPLICABLE_SMOKE",
+            "FULL_VAL_THREE_CHECKPOINT_STATES": "PASS"
+            if self.run_mode == "FULL" and [row["model_tag"] for row in self.full_val_rows] == ["zero_init", "best_eval", "last"]
+            else "NOT_APPLICABLE_SMOKE",
+            "FULL_VAL_BEST_FLOW_IMPROVED": "PASS"
+            if self.run_mode == "FULL" and full.get("best_eval", float("inf")) <= 0.90 * full.get("zero_init", 0.0)
+            else "NOT_APPLICABLE_SMOKE",
             "BEST_CHECKPOINT_STATE_HASH_GATE": self.best_state_hash_gate,
             "LAST_CHECKPOINT_STATE_HASH_GATE": self.last_state_hash_gate,
             "CHECKPOINT_RELOAD_RESTORE_GATE": self.checkpoint_reload_restore_gate,
@@ -447,14 +499,43 @@ class RAALFormal5000Runner:
             else "FAIL",
             "NEGATIVE_RAAL_ZERO_GATE": self._negative_raal_zero_gate(state.train_rows),
             "PRIMARY_HOOK_COUNT_GATE": self._primary_hook_count_gate(state.train_rows),
+            "RAAL_GRAD_TO_RGDA": self._raal_grad_gate(state.train_rows),
             "OOM_COUNT": str(getattr(trainer, "oom_count", 0)),
             "NAN_INF_COUNT": str(getattr(trainer, "nan_inf_count", 0)),
             "OOM_GATE": "PASS" if getattr(trainer, "oom_count", 0) == 0 else "FAIL",
             "NAN_INF_GATE": "PASS" if getattr(trainer, "nan_inf_count", 0) == 0 else "FAIL",
-            "FULL_VAL_MODE": "NOT_APPLICABLE_SMOKE" if self.run_mode == "SMOKE" else "PENDING_FULL_VAL",
-            "FINAL_VERDICT": "PASS" if self.run_mode == "SMOKE" and state.step == self.steps else "PENDING_FULL5000_GATES",
+            "FULL_VAL_MODE": "NOT_APPLICABLE_SMOKE" if self.run_mode == "SMOKE" else "FULL_VAL424",
             "REAL_SD3_USED": "YES",
         }
+        required = [
+            "FORMAL_MANIFEST",
+            "FORMAL_SCHEDULE",
+            "FORMAL_CLEAN_PROXY",
+            "FORMAL_CACHE",
+            "TRAIN_5000_STEPS",
+            "POSITIVE_NEGATIVE_BALANCE",
+            "ALL_1980_TRAIN_IMAGES_USED",
+            "STRATUM_USAGE_FAIR",
+            "BASE_HASH_GATE",
+            "NEGATIVE_RAAL_ZERO_GATE",
+            "PRIMARY_HOOK_COUNT_GATE",
+            "RAAL_GRAD_TO_RGDA",
+            "TRAIN_FLOW_LOSS_IMPROVED",
+            "FLOW_EVAL128_IMPROVED",
+            "BEST_FLOW_EVAL128_IMPROVED",
+            "FULL_VAL_BEST_FLOW_IMPROVED",
+            "BEST_CHECKPOINT_STATE_HASH_GATE",
+            "LAST_CHECKPOINT_STATE_HASH_GATE",
+            "CHECKPOINT_RELOAD_RESTORE_GATE",
+            "CHECKPOINT_RELOAD_GATE",
+            "OOM_GATE",
+            "NAN_INF_GATE",
+        ]
+        if self.run_mode == "SMOKE":
+            status["FINAL_VERDICT"] = "PASS" if state.step == self.steps and status["SMOKE_EXECUTION_GATE"] == "PASS" else "FAIL"
+        else:
+            status["FINAL_VERDICT"] = "PASS" if all(status.get(key) == "PASS" for key in required) else "FAIL"
+        return status
 
     def _read_schedule(self) -> list[dict[str, str]]:
         return read_csv(self.schedule_manifest)
@@ -512,20 +593,43 @@ class RAALFormal5000Runner:
     ) -> dict[str, str]:
         pos = 0
         neg = 0
-        for item in schedule_rows:
+        expected = Counter(int(item["pool_index"]) for item in schedule_rows[: self.steps])
+        for item in schedule_rows[: self.steps]:
             row = train_rows[int(item["pool_index"])]
             if row.get("is_negative") == "true":
                 neg += 1
             else:
                 pos += 1
-        all_used = all(usage.get(index, 0) > 0 for index in range(len(train_rows))) if self.steps == 5000 else True
+        exact = all(usage.get(index, 0) == expected.get(index, 0) for index in range(len(train_rows)))
+        all_used = all(usage.get(index, 0) > 0 for index in range(len(train_rows))) if self.run_mode == "FULL" else True
         return {
             "POSITIVE_STEPS": str(pos),
             "NEGATIVE_STEPS": str(neg),
             "POSITIVE_NEGATIVE_BALANCE": "PASS" if self.run_mode == "SMOKE" or (pos == 2500 and neg == 2500) else "FAIL",
             "ALL_1980_TRAIN_IMAGES_USED": "PASS" if all_used else "FAIL",
-            "STRATUM_USAGE_FAIR": "PASS" if self.run_mode == "SMOKE" else "PENDING_FULL5000",
+            "SAMPLE_USAGE_EXACT_GATE": "PASS" if exact else "FAIL",
+            "STRATUM_USAGE_FAIR": "PASS" if self.run_mode == "SMOKE" or exact else "FAIL",
+            "SAMPLE_USAGE_ROWS": str(len(train_rows)),
         }
+
+    def _write_sample_usage(self, train_rows: list[dict[str, str]], usage: dict[int, int], schedule_rows: list[dict[str, str]]) -> None:
+        expected = Counter(int(item["pool_index"]) for item in schedule_rows[: self.steps])
+        rows = []
+        for index, row in enumerate(train_rows):
+            uses = int(usage.get(index, 0))
+            exp = int(expected.get(index, 0))
+            rows.append(
+                {
+                    "pool_index": str(index),
+                    "source_sample_id": row["source_sample_id"],
+                    "is_negative": row.get("is_negative", ""),
+                    "anchor_class": row.get("anchor_class", ""),
+                    "uses": str(uses),
+                    "expected_uses": str(exp),
+                    "usage_difference": str(uses - exp),
+                }
+            )
+        self._write_csv(self.report_dir / "sample_usage.csv", rows)
 
     @staticmethod
     def _negative_raal_zero_gate(rows: list[dict[str, str]]) -> str:
@@ -542,6 +646,19 @@ class RAALFormal5000Runner:
         return "PASS"
 
     @staticmethod
+    def _raal_grad_gate(rows: list[dict[str, str]]) -> str:
+        for row in rows:
+            if row["is_negative"] == "false" and (
+                float(row.get("normal_encoder_grad", 0.0)) <= 0.0 or float(row.get("normal_adapter_grad", 0.0)) <= 0.0
+            ):
+                return "FAIL"
+            if row["is_negative"] == "true" and (
+                float(row.get("rg_encoder_grad", 0.0)) != 0.0 or float(row.get("defect_adapter_grad", 0.0)) != 0.0
+            ):
+                return "FAIL"
+        return "PASS"
+
+    @staticmethod
     def _write_csv(path: Path, rows: list[dict[str, str]]) -> None:
         if not rows:
             return
@@ -552,9 +669,11 @@ class RAALFormal5000Runner:
             writer.writerows(rows)
 
     @classmethod
-    def _append_csv(cls, path: Path, row: dict[str, str]) -> None:
-        exists = path.exists()
-        with path.open("a", newline="", encoding="utf-8") as handle:
+    def _append_csv(cls, path: Path, row: dict[str, str], *, append: bool = True) -> None:
+        exists = path.exists() and append
+        mode = "a" if append else "w"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open(mode, newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(handle, fieldnames=list(row))
             if not exists:
                 writer.writeheader()
