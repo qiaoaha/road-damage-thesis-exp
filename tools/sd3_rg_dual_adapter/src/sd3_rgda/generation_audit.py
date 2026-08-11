@@ -64,9 +64,12 @@ def audit_generation_results(
     *,
     expected_checkpoint_sha256: str,
     expected_sources: int = 1000,
+    expected_mode: str = "paired",
     val_source_shas: set[str] | None = None,
     test_source_shas: set[str] | None = None,
 ) -> GenerationAudit:
+    if expected_mode not in {"paired", "base", "rgda"}:
+        raise ValueError("expected_mode must be paired, base, or rgda")
     all_rows = read_generation_manifest(generation_manifest)
     results = _read_results(results_csv)
     result_indices = {result["generation_index"] for result in results}
@@ -126,7 +129,8 @@ def audit_generation_results(
         result["mode"] == "rgda" and result["rgda_checkpoint_sha256"] == expected_checkpoint_sha256 for result in results
     )
     complete_pairs = all(("base", row["generation_index"]) in result_by_key and ("rgda", row["generation_index"]) in result_by_key for row in rows)
-    negative_expected = sum(row["is_negative"] == "true" for row in rows) * 2
+    mode_multiplier = 2 if expected_mode == "paired" else 1
+    negative_expected = sum(row["is_negative"] == "true" for row in rows) * mode_multiplier
     base_forward_ok = sum(
         result["mode"] == "base"
         and int(result.get("transformer_forward_count") or 0) > 0
@@ -166,31 +170,31 @@ def audit_generation_results(
         base_rgda_generation_param_match=f"{param_pairs}/{expected_sources}",
         audit_gate="PASS"
         if len(rows) == expected_sources
-        and len(results) == expected_sources * 2
-        and base_rows == expected_sources
-        and rgda_rows == expected_sources
-        and base_success == expected_sources
-        and rgda_success == expected_sources
+        and len(results) == expected_sources * mode_multiplier
+        and (base_rows == expected_sources if expected_mode in {"paired", "base"} else base_rows == 0)
+        and (rgda_rows == expected_sources if expected_mode in {"paired", "rgda"} else rgda_rows == 0)
+        and (base_success == expected_sources if expected_mode in {"paired", "base"} else base_success == 0)
+        and (rgda_success == expected_sources if expected_mode in {"paired", "rgda"} else rgda_success == 0)
         and failures == 0
-        and len(set(output_files)) == expected_sources * 2
-        and len(set(output_shas)) == expected_sources * 2
-        and image_sha_reverified == expected_sources * 2
-        and label_matches == expected_sources * 2
-        and file_label_matches == expected_sources * 2
+        and len(set(output_files)) == expected_sources * mode_multiplier
+        and len(set(output_shas)) == expected_sources * mode_multiplier
+        and image_sha_reverified == expected_sources * mode_multiplier
+        and label_matches == expected_sources * mode_multiplier
+        and file_label_matches == expected_sources * mode_multiplier
         and negative_ok == negative_expected
         and corrupt == 0
         and shape == 0
         and val_leakage == 0
         and test_leakage == 0
-        and base_forward_ok == expected_sources
-        and rgda_forward_ok == expected_sources
-        and source_pairs == expected_sources
-        and seed_pairs == expected_sources
-        and prompt_pairs == expected_sources
-        and param_pairs == expected_sources
-        and rgda_sha == expected_sources
-        and base_none == expected_sources
-        and complete_pairs
+        and (base_forward_ok == expected_sources if expected_mode in {"paired", "base"} else base_forward_ok == 0)
+        and (rgda_forward_ok == expected_sources if expected_mode in {"paired", "rgda"} else rgda_forward_ok == 0)
+        and (source_pairs == expected_sources if expected_mode == "paired" else source_pairs == 0)
+        and (seed_pairs == expected_sources if expected_mode == "paired" else seed_pairs == 0)
+        and (prompt_pairs == expected_sources if expected_mode == "paired" else prompt_pairs == 0)
+        and (param_pairs == expected_sources if expected_mode == "paired" else param_pairs == 0)
+        and (rgda_sha == expected_sources if expected_mode in {"paired", "rgda"} else rgda_sha == 0)
+        and (base_none == expected_sources if expected_mode in {"paired", "base"} else base_none == 0)
+        and (complete_pairs if expected_mode == "paired" else True)
         else "FAIL",
     )
     return audit
@@ -219,8 +223,8 @@ def build_yolo_ablation_dataset(
     expected_test: int = 425,
     expected_synthetic: int = 1000,
 ) -> YoloDatasetAudit:
-    if group not in {"real", "sd3", "rgda"}:
-        raise ValueError("group must be real, sd3, or rgda")
+    if group not in {"real", "sd3", "rgda", "raal"}:
+        raise ValueError("group must be real, sd3, rgda, or raal")
     real = Path(real_dataset_root)
     out = Path(output_root) / group
     _prepare_yolo_dirs(out)

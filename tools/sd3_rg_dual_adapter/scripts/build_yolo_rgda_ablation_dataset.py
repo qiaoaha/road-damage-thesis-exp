@@ -11,7 +11,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--real-dataset-root", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
-    parser.add_argument("--group", choices=["real", "sd3", "rgda"], required=True)
+    parser.add_argument("--group", choices=["real", "sd3", "rgda", "raal"], required=True)
     parser.add_argument("--synthetic-images", type=Path)
     parser.add_argument("--synthetic-labels", type=Path)
     parser.add_argument("--link-mode", choices=["hardlink", "symlink", "copy"], default="hardlink")

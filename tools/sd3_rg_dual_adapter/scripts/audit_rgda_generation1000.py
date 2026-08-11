@@ -14,12 +14,14 @@ def main() -> int:
     parser.add_argument("--checkpoint-sha256", required=True)
     parser.add_argument("--output", type=Path, default=Path("qa/generation_audit.md"))
     parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--mode", choices=["paired", "base", "rgda"], default="paired")
     args = parser.parse_args()
     audit = audit_generation_results(
         args.manifest,
         args.results,
         expected_checkpoint_sha256=args.checkpoint_sha256,
         expected_sources=16 if args.smoke else 1000,
+        expected_mode=args.mode,
     )
     write_generation_audit(args.output, audit)
     print(f"{'SMOKE_AUDIT' if args.smoke else 'GENERATION_AUDIT'}={audit.audit_gate}")

@@ -14,6 +14,7 @@ groups:
   real: D0_REAL
   sd3: D1_REAL_SD3
   rgda: D2_REAL_RGDA
+  raal: D3_REAL_RGDA_RAAL
 reuse_policy:
   require_split_identity: true
   require_model_identity: true

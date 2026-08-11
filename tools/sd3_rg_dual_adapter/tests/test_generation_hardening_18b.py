@@ -113,6 +113,26 @@ def test_formal_audit_still_requires_2000(tmp_path: Path) -> None:
     assert audit.audit_gate == "FAIL"
 
 
+def test_raal_rgda_only_audit_accepts_1000_rows(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.csv"
+    results = tmp_path / "results.csv"
+    rows = _small_rows(tmp_path, 16)
+    _write_manifest(manifest, rows)
+    _write_results(results, rows, modes=["rgda"])
+    audit = audit_generation_results(
+        manifest,
+        results,
+        expected_checkpoint_sha256="abc",
+        expected_sources=16,
+        expected_mode="rgda",
+    )
+    assert audit.result_rows == 16
+    assert audit.base_rows == 0
+    assert audit.rgda_rows == 16
+    assert audit.rgda_checkpoint_sha_match == "16/16"
+    assert audit.audit_gate == "PASS"
+
+
 def test_smoke_shell_uses_smoke_audit() -> None:
     shell = Path("run_sd3_rgda_generation1000.sh").read_text(encoding="utf-8")
     assert "--smoke || exit 1" in shell
@@ -144,9 +164,34 @@ def test_yolo_synthetic_count_not_1000_fails_and_no_double_prefix(tmp_path: Path
     assert not (tmp_path / "out" / "rgda" / "images" / "train" / "sd3rgda_sd3rgda_x.png").exists()
 
 
+def test_yolo_raal_group_uses_rgda_prefix(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    make_yolo(real, train=10, val=4, test=4)
+    synth_i = tmp_path / "synth" / "images"
+    synth_l = tmp_path / "synth" / "labels"
+    synth_i.mkdir(parents=True)
+    synth_l.mkdir(parents=True)
+    Image.new("RGB", (8, 8)).save(synth_i / "sd3rgda_x.png")
+    (synth_l / "sd3rgda_x.txt").write_text("", encoding="utf-8")
+    audit = build_yolo_ablation_dataset(
+        real,
+        tmp_path / "out",
+        group="raal",
+        synthetic_images=synth_i,
+        synthetic_labels=synth_l,
+        link_mode="copy",
+        expected_real_train=10,
+        expected_val=4,
+        expected_test=4,
+        expected_synthetic=1,
+    )
+    assert audit.dataset_gate == "PASS"
+    assert (tmp_path / "out" / "raal" / "images" / "train" / "sd3rgda_x.png").exists()
+
+
 def test_ablation_delta_math(tmp_path: Path) -> None:
     root = tmp_path / "results"
-    for group, map50, map95 in [("real", 0.2, 0.1), ("sd3", 0.25, 0.12), ("rgda", 0.28, 0.13)]:
+    for group, map50, map95 in [("real", 0.2, 0.1), ("sd3", 0.25, 0.12), ("rgda", 0.28, 0.13), ("raal", 0.31, 0.14)]:
         out = root / group
         out.mkdir(parents=True)
         (out / "test_metrics.json").write_text(
@@ -165,6 +210,7 @@ def test_ablation_delta_math(tmp_path: Path) -> None:
         sys.argv = old
     payload = json.loads((root / "final_ablation.json").read_text(encoding="utf-8"))
     assert payload["deltas"]["DELTA_RGDA_MAP50"] == pytest.approx(0.03)
+    assert payload["deltas"]["DELTA_RAAL_MAP50"] == pytest.approx(0.03)
 
 
 def _write_cache(path: Path, rows: list[tuple[str, str]]) -> None:
@@ -216,7 +262,7 @@ def _write_manifest(path: Path, rows: list[dict[str, str]]) -> None:
         writer.writerows(rows)
 
 
-def _write_results(path: Path, rows: list[dict[str, str]]) -> None:
+def _write_results(path: Path, rows: list[dict[str, str]], modes: list[str] | None = None) -> None:
     fields = [
         "generation_index",
         "mode",
@@ -248,7 +294,7 @@ def _write_results(path: Path, rows: list[dict[str, str]]) -> None:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         for row in rows:
-            for mode in ["base", "rgda"]:
+            for mode in modes or ["base", "rgda"]:
                 out_image = path.parent / f"{mode}_{row['generation_index']}.png"
                 img = Image.new(
                     "RGB",

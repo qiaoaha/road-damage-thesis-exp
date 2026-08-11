@@ -1,0 +1,16 @@
+{
+  "formal_archive_sha256": "606ed511b8d26ac1c65e8c4462251fe7084a6352b74e1b406cccff57fd70c9a1",
+  "formal_report_member": "sd3_rgda_raal_formal5000_gpu_20260811_190738/35_RAAL_FORMAL5000_GPU_FINAL.md",
+  "formal_commit": "5c170e28c02e21b395190301997af2d36b79c517",
+  "formal_verdict": "PASS",
+  "ready_for_raal_generation1000": "PASS",
+  "best_checkpoint_member": "sd3_rgda_raal_formal5000_gpu_20260811_190738/checkpoints/raal_formal5000/best_eval.pt",
+  "best_checkpoint_path": "/root/autodl-tmp/road_damage_exp/reports/sd3_rgda_raal_formal5000_gpu_20260811_190738/checkpoints/raal_formal5000/best_eval.pt",
+  "best_checkpoint_sha256": "08071140be9c6f18f018847123cf6bc373ab70db83290e4e543ae30ca225a007",
+  "best_flow_eval_step": "5000",
+  "best_flow_eval_loss": "0.00631499",
+  "d3_contract": "REUSE_D2_MANIFEST_CHECKPOINT_ONLY_CHANGE",
+  "gpu_used": "NO",
+  "real_sd3_used": "NO",
+  "ready_for_d3_gpu_smoke16": "PENDING_D2_MANIFEST"
+}

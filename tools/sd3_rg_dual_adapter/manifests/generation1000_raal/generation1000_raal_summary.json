@@ -1,0 +1,14 @@
+{
+  "total": 1000,
+  "positive": 750,
+  "negative": 250,
+  "d2_manifest_sha256": "2f6ca64ac3d98c40caa6f03202555e46c1175ea872504db9434a3be9c46c5c0a",
+  "d3_manifest_sha256": "f8fdf3d57bfa82c691bccfefc931953f723598cffdc400d4332e48242b7a50fe",
+  "formal_commit": "5c170e28c02e21b395190301997af2d36b79c517",
+  "checkpoint_path": "/root/autodl-tmp/road_damage_exp/reports/sd3_rgda_raal_formal5000_gpu_20260811_190738/checkpoints/raal_formal5000/best_eval.pt",
+  "checkpoint_sha256": "08071140be9c6f18f018847123cf6bc373ab70db83290e4e543ae30ca225a007",
+  "best_flow_eval_step": "5000",
+  "best_flow_eval_loss": "0.00631499",
+  "pairing_gate": "PASS",
+  "raal_inference_gate": "PASS"
+}
