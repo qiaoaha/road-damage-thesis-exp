@@ -571,8 +571,8 @@ class RAALFormal5000Runner:
             if polarity and ((polarity == "negative") != (row.get("is_negative") == "true")):
                 raise ValueError("RAAL_FORMAL_SCHEDULE_EXECUTION_MISMATCH")
         if self.steps == 5000:
-            pos = sum(row.get("polarity") == "positive" for row in schedule_rows[:5000])
-            neg = sum(row.get("polarity") == "negative" for row in schedule_rows[:5000])
+            pos = sum(row["is_negative"] == "false" for row in schedule_rows[:5000])
+            neg = sum(row["is_negative"] == "true" for row in schedule_rows[:5000])
             if pos != 2500 or neg != 2500:
                 raise ValueError("RAAL_FORMAL_SCHEDULE_BALANCE_FAIL")
 

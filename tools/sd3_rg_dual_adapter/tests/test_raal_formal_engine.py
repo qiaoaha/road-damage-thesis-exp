@@ -9,6 +9,7 @@ import pytest
 import torch
 from torch import nn
 
+from sd3_rgda.formal_manifest import SCHEDULE_FIELDS
 from sd3_rgda.pilot_engine import read_csv
 from sd3_rgda.raal import RAALConfig
 from sd3_rgda.raal_formal_engine import (
@@ -667,3 +668,57 @@ def test_smoke_base_hash_failure_makes_final_verdict_fail(tmp_path: Path) -> Non
         sample_usage_counts={},
     )
     assert runner._final_status(state, trainer, 0.0, 0.0)["FINAL_VERDICT"] == "FAIL"
+
+
+def test_formal_schedule_schema_uses_is_negative_not_polarity() -> None:
+    assert "is_negative" in SCHEDULE_FIELDS
+    assert "polarity" not in SCHEDULE_FIELDS
+
+
+def test_raal_formal_full_schedule_balance_uses_manifest_schema(tmp_path: Path) -> None:
+    runner = _runner(tmp_path, steps=5000)
+    train_rows = [
+        {
+            "source_sample_id": f"src-{index:04d}",
+            "is_negative": "true" if index % 2 else "false",
+            "cache_path": "",
+            "anchor_class": "" if index % 2 else "D00",
+        }
+        for index in range(5000)
+    ]
+    schedule_rows = [
+        {
+            "step": str(index + 1),
+            "pool_index": str(index),
+            "source_sample_id": f"src-{index:04d}",
+            "is_negative": "true" if index % 2 else "false",
+        }
+        for index in range(5000)
+    ]
+    assert sum(row["is_negative"] == "false" for row in schedule_rows) == 2500
+    assert sum(row["is_negative"] == "true" for row in schedule_rows) == 2500
+    runner._validate_schedule(train_rows, schedule_rows)
+
+
+def test_raal_formal_full_schedule_imbalance_still_rejects(tmp_path: Path) -> None:
+    runner = _runner(tmp_path, steps=5000)
+    train_rows = [
+        {
+            "source_sample_id": f"src-{index:04d}",
+            "is_negative": "false" if index < 2499 else "true",
+            "cache_path": "",
+            "anchor_class": "D00" if index < 2499 else "",
+        }
+        for index in range(5000)
+    ]
+    schedule_rows = [
+        {
+            "step": str(index + 1),
+            "pool_index": str(index),
+            "source_sample_id": f"src-{index:04d}",
+            "is_negative": "false" if index < 2499 else "true",
+        }
+        for index in range(5000)
+    ]
+    with pytest.raises(ValueError, match="RAAL_FORMAL_SCHEDULE_BALANCE_FAIL"):
+        runner._validate_schedule(train_rows, schedule_rows)
