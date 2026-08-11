@@ -127,6 +127,29 @@ class RealSD3RGDARAALTrainer(RealSD3RGDATrainer):
     def forward_loss(self, batch: Any) -> torch.Tensor:
         return self.forward_loss_components(batch).total_loss
 
+    def backward_step(self, batch: Any) -> dict[str, float]:
+        retain = self.raal_config.enabled and not bool(getattr(batch.sample, "is_negative", False))
+        components = self.forward_loss_components(batch, retain_hooks_for_backward=retain)
+        self.optimizer.zero_grad(set_to_none=True)
+        try:
+            torch.autograd.backward(components.total_loss)
+            grad_norm_raw = torch.nn.utils.clip_grad_norm_(self.injector.parameters(), 1.0)
+            self.assert_base_gradients_none()
+            if hasattr(self, "optimizer_step"):
+                self.optimizer_step()
+            else:
+                self.optimizer.step()
+        except torch.cuda.OutOfMemoryError:
+            self.runtime_state.record_oom()
+            raise
+        finally:
+            if components.collector is not None:
+                components.collector.close()
+        metrics = dict(components.metrics)
+        metrics["loss"] = metrics["total_loss"]
+        metrics["grad_norm"] = float(grad_norm_raw.detach().cpu())
+        return metrics
+
 
 def evaluate_raal_batches(trainer: RealSD3RGDARAALTrainer, batches: list[Any]) -> list[dict[str, float]]:
     rows: list[dict[str, float]] = []
