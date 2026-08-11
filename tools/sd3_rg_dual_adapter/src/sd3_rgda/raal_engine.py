@@ -104,10 +104,14 @@ class RealSD3RGDARAALTrainer(RealSD3RGDATrainer):
             raal_loss = flow_loss * 0.0
         weighted_raal_loss = raal_loss * float(self.raal_config.weight)
         total_loss = flow_loss + weighted_raal_loss
+        if not torch.isfinite(flow_loss) or not torch.isfinite(raal_loss) or not torch.isfinite(weighted_raal_loss) or not torch.isfinite(total_loss):
+            self.runtime_state.record_nan_inf()
+            raise FloatingPointError("RAAL loss components contain non-finite values")
         metrics = {
             "flow_loss": float(flow_loss.detach().cpu()),
             "raal_loss": float(raal_loss.detach().cpu()),
             "weighted_raal_loss": float(weighted_raal_loss.detach().cpu()),
+            "total_loss": float(total_loss.detach().cpu()),
             "raal_hook_count": float(forward_stats.hook_call_count),
             "inside_attention_mass": float(forward_stats.inside_mass.detach().cpu()) if forward_stats.inside_mass is not None else 0.0,
             "outside_attention_mass": float(forward_stats.outside_mass.detach().cpu()) if forward_stats.outside_mass is not None else 0.0,
@@ -134,11 +138,23 @@ class RealSD3RGDARAALTrainer(RealSD3RGDATrainer):
         try:
             torch.autograd.backward(components.total_loss)
             grad_norm_raw = torch.nn.utils.clip_grad_norm_(self.injector.parameters(), 1.0)
+            if not torch.isfinite(grad_norm_raw):
+                self.runtime_state.record_nan_inf()
+                raise FloatingPointError("RAAL grad norm is non-finite")
             self.assert_base_gradients_none()
+            for gradient in self.gradient_report().values():
+                if not torch.isfinite(torch.tensor(float(gradient))):
+                    self.runtime_state.record_nan_inf()
+                    raise FloatingPointError("RAAL gradient report contains non-finite values")
             if hasattr(self, "optimizer_step"):
                 self.optimizer_step()
             else:
                 self.optimizer.step()
+            for module in self.injector.trainable_modules().values():
+                for parameter in module.parameters():
+                    if not torch.isfinite(parameter).all():
+                        self.runtime_state.record_nan_inf()
+                        raise FloatingPointError("RAAL adapter parameter contains non-finite values")
         except torch.cuda.OutOfMemoryError:
             self.runtime_state.record_oom()
             raise

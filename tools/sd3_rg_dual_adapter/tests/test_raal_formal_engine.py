@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,9 +29,10 @@ class Tokenizer3:
 
 
 class FakePipe:
-    tokenizer = SimpleNamespace(model_max_length=77)
-    tokenizer_3 = Tokenizer3()
-    scheduler = object()
+    def __init__(self) -> None:
+        self.tokenizer = SimpleNamespace(model_max_length=77)
+        self.tokenizer_3 = Tokenizer3()
+        self.scheduler = object()
 
 
 class FakeTransformer(nn.Module):
@@ -63,6 +65,7 @@ class FakeSample:
     def __init__(self, is_negative: bool) -> None:
         self.is_negative = is_negative
         self.class_ids = () if is_negative else (0,)
+        self.anchor_class = "" if is_negative else "D00"
 
 
 class FakeTrainer:
@@ -71,6 +74,8 @@ class FakeTrainer:
         self.injector = FakeInjector()
         self.optimizer = torch.optim.SGD(self.injector.parameters(), lr=0.01)
         self.loaded: list[str] = []
+        self.eval_mode_calls = 0
+        self.train_mode_calls = 0
 
     def load_cached_sample(self, cache_path: str) -> FakeSample:
         self.loaded.append(cache_path)
@@ -94,19 +99,53 @@ class FakeTrainer:
             "weighted_raal_loss": float((0.02 * raal).detach()),
             "total_loss": float(total.detach()),
             "raal_hook_count": 0.0 if negative else 3.0,
+            "inside_attention_mass": 0.0 if negative else 0.7,
+            "outside_attention_mass": 0.0 if negative else 0.3,
+            "concentration_ratio": 0.0 if negative else 2.3,
+            "layer_5_calls": 0.0 if negative else 1.0,
+            "layer_11_calls": 0.0 if negative else 1.0,
+            "layer_17_calls": 0.0 if negative else 1.0,
         }
 
     def forward_loss_components(self, batch: object, *, retain_hooks_for_backward: bool = False) -> object:
         negative = bool(batch.sample.is_negative)
         flow = torch.tensor(1.0 if negative else 0.8)
         raal = torch.tensor(0.0 if negative else 0.2)
-        return SimpleNamespace(flow_loss=flow, raal_loss=raal, metrics={}, collector=None)
+        return SimpleNamespace(
+            flow_loss=flow,
+            raal_loss=raal,
+            metrics={
+                "inside_attention_mass": 0.0 if negative else 0.7,
+                "outside_attention_mass": 0.0 if negative else 0.3,
+                "concentration_ratio": 0.0 if negative else 2.3,
+            },
+            collector=None,
+        )
 
     def gradient_report(self) -> dict[str, float]:
         return {name: 0.1 for name in self.injector.trainable_modules()}
 
     def compare_outputs(self, _checkpoint: Path, _batch: object) -> float:
         return 0.0
+
+    def train(self) -> None:
+        self.eval_mode_calls += 0
+
+
+class RecordingModule(FakeTransformer):
+    def __init__(self) -> None:
+        super().__init__()
+        self.eval_calls = 0
+        self.train_calls = 0
+
+    def eval(self) -> RecordingModule:
+        self.eval_calls += 1
+        return self
+
+    def train(self, mode: bool = True) -> RecordingModule:
+        if mode:
+            self.train_calls += 1
+        return self
 
 
 def _manifest(path: Path, rows: int) -> Path:
@@ -155,9 +194,29 @@ def _runner(tmp_path: Path, *, steps: int = 2) -> RAALFormal5000Runner:
     eval128 = _manifest(tmp_path / "eval128.csv", 128)
     val = _manifest(tmp_path / "val.csv", 424)
     schedule = _schedule(tmp_path / "schedule.csv")
-    dummy = tmp_path / "audit.json"
-    dummy.write_text("{}", encoding="utf-8")
-    return RAALFormal5000Runner(
+    manifest_summary = tmp_path / "manifest_summary.json"
+    manifest_summary.write_text(
+        json.dumps(
+            {
+                "train_pool_rows": 1980,
+                "val_full_rows": 424,
+                "eval128_rows": 128,
+                "train_val_overlap": 0,
+                "train_test_overlap": 0,
+                "val_test_overlap": 0,
+                "eval_test_overlap": 0,
+                "test_leakage": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    schedule_audit = tmp_path / "schedule_audit.json"
+    schedule_audit.write_text(json.dumps({"schedule_rows": 5000, "schedule_audit": "PASS"}), encoding="utf-8")
+    proxy_audit = tmp_path / "clean_proxy_audit.json"
+    proxy_audit.write_text(json.dumps({"PROXY_TOTAL": 2404, "FORMAL_CLEAN_PROXY_READY": "PASS"}), encoding="utf-8")
+    cache_audit = tmp_path / "cache_audit.json"
+    cache_audit.write_text(json.dumps({"TRAIN_CACHE_ROWS": 1980, "VAL_CACHE_ROWS": 424, "CACHE_READY": "PASS"}), encoding="utf-8")
+    runner = RAALFormal5000Runner(
         model_path=tmp_path / "model",
         train_cache_manifest=train,
         eval128_cache_manifest=eval128,
@@ -166,10 +225,10 @@ def _runner(tmp_path: Path, *, steps: int = 2) -> RAALFormal5000Runner:
         val_full_manifest=val,
         eval128_manifest=eval128,
         schedule_manifest=schedule,
-        manifest_summary=dummy,
-        schedule_audit=dummy,
-        clean_proxy_audit=dummy,
-        cache_audit=dummy,
+        manifest_summary=manifest_summary,
+        schedule_audit=schedule_audit,
+        clean_proxy_audit=proxy_audit,
+        cache_audit=cache_audit,
         report_dir=tmp_path / "report",
         steps=steps,
         checkpoint_interval=1,
@@ -182,6 +241,8 @@ def _runner(tmp_path: Path, *, steps: int = 2) -> RAALFormal5000Runner:
             trainer.build_flow_batch(FakeSample(index % 2 == 1)) for index in range(128)
         ],
     )
+    runner.expected_mask_bank_sha256 = DefectTextMaskBank.build(Tokenizer3(), clip_seq_len=77).sha256()
+    return runner
 
 
 def test_raal_formal_uses_real_raal_trainer_contract(tmp_path: Path) -> None:
@@ -253,3 +314,86 @@ def test_raal_formal_dry_integration(tmp_path: Path) -> None:
     assert (tmp_path / "dry" / "eval128_metrics.csv").exists()
     assert (tmp_path / "dry" / "checkpoints" / "raal_formal5000" / "best_eval.pt").exists()
     assert "RAAL_FORMAL_DRY_INTEGRATION=PASS" in (tmp_path / "dry" / "RAAL_FORMAL_DRY_STATUS.md").read_text(encoding="utf-8")
+
+
+def test_raal_formal_builds_mask_bank_before_transformer_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    pipe = FakePipe()
+
+    def cleanup_preparer(active_pipe: FakePipe) -> tuple[FakeTransformer, object]:
+        delattr(active_pipe, "tokenizer")
+        delattr(active_pipe, "tokenizer_3")
+        return FakeTransformer(), SimpleNamespace()
+
+    runner = _runner(tmp_path)
+    runner.pipeline_loader = lambda _path, _dtype: pipe
+    runner.transformer_preparer = cleanup_preparer
+    runner.run()
+    assert runner.mask_bank_sha == runner.expected_mask_bank_sha256
+
+
+def test_raal_backward_step_returns_total_loss() -> None:
+    bank = DefectTextMaskBank.build(Tokenizer3(), clip_seq_len=77)
+    trainer = FakeTrainer(RAALConfig(), bank)
+    metrics = trainer.backward_step(trainer.build_flow_batch(FakeSample(False)))
+    assert "flow_loss" in metrics
+    assert "raal_loss" in metrics
+    assert "weighted_raal_loss" in metrics
+    assert "total_loss" in metrics
+    assert metrics["total_loss"] == pytest.approx(metrics["flow_loss"] + metrics["weighted_raal_loss"])
+
+
+def test_raal_formal_seed_before_trainer_creation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    observed: list[int] = []
+    runner = _runner(tmp_path)
+
+    def factory(config: RAALConfig, bank: DefectTextMaskBank) -> FakeTrainer:
+        observed.append(torch.initial_seed())
+        return FakeTrainer(config, bank)
+
+    runner.trainer_factory = factory
+    runner.run()
+    assert observed == [2026]
+
+
+def test_raal_formal_expected_mask_sha_reject(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    runner = _runner(tmp_path)
+    runner.expected_mask_bank_sha256 = "bad"
+    with pytest.raises(RuntimeError, match="RAAL_FORMAL_MASK_BANK_SHA_MISMATCH"):
+        runner.run()
+
+
+def test_raal_formal_real_preflight_gates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    runner = _runner(tmp_path)
+    runner.run()
+    status = (tmp_path / "report" / "RAAL_FORMAL_FINAL_STATUS.md").read_text(encoding="utf-8")
+    assert "FORMAL_MANIFEST=PASS" in status
+    assert "FORMAL_SCHEDULE=PASS" in status
+    assert "FORMAL_CLEAN_PROXY=PASS" in status
+    assert "FORMAL_CACHE=PASS" in status
+
+
+def test_raal_formal_eval_no_grad_and_hash_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    runner = _runner(tmp_path)
+    trainer = FakeTrainer(RAALConfig(), DefectTextMaskBank.build(Tokenizer3(), clip_seq_len=77))
+    before = {name: {key: value.clone() for key, value in module.state_dict().items()} for name, module in trainer.injector.trainable_modules().items()}
+    runner._evaluate(0, trainer, [trainer.build_flow_batch(FakeSample(False)), trainer.build_flow_batch(FakeSample(True))])
+    after = {name: module.state_dict() for name, module in trainer.injector.trainable_modules().items()}
+    assert all(torch.equal(before[name][key], after[name][key]) for name in before for key in before[name])
+
+
+def test_raal_formal_checkpoint_state_sha_failure_controls_verdict(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    result = _runner(tmp_path, steps=1).run()
+    payload = torch.load(result.checkpoint_path, map_location="cpu", weights_only=False)
+    payload["adapter_state_sha256"] = "bad"
+    torch.save(payload, result.checkpoint_path)
+    runner = _runner(tmp_path / "reload", steps=1)
+    trainer = FakeTrainer(RAALConfig(), DefectTextMaskBank.build(Tokenizer3(), clip_seq_len=77))
+    diff = runner._checkpoint_reload_diff(trainer, result.checkpoint_path, [trainer.build_flow_batch(FakeSample(False))], "last")
+    assert runner.last_state_hash_gate == "FAIL"
+    assert diff == float("inf")
