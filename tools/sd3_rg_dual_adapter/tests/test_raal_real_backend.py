@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -98,7 +99,7 @@ class FakeTrainer:
     def build_flow_batch(self, sample: FakeSample) -> object:
         return SimpleNamespace(sample=sample)
 
-    def forward_loss_components(self, batch: object) -> object:
+    def forward_loss_components(self, batch: object, *, retain_hooks_for_backward: bool = False) -> object:
         value = sum(parameter.sum() for parameter in self.injector.parameters())
         negative = bool(batch.sample.is_negative)
         flow_loss = (value + 1.0).pow(2)
@@ -123,6 +124,8 @@ class FakeTrainer:
                 "layer_11_calls": 0.0 if negative else 1.0,
                 "layer_17_calls": 0.0 if negative else 1.0,
             },
+            collector=None,
+            retain_hooks_for_backward=retain_hooks_for_backward,
         )
 
     def forward_loss(self, _batch: object) -> torch.Tensor:
@@ -388,6 +391,35 @@ def test_base_hash_unchanged_status(tmp_path: Path) -> None:
     assert "NAN_INF_COUNT=0" in status
     assert "RAAL_GRAD_CONTRIBUTION_TO_RGDA=PASS" in status
     assert "RAAL_DIAGNOSTIC_RNG_PRESERVED=PASS" in status
+
+
+def test_gradient_diagnostic_retains_hooks_for_flow_and_total_backward(tmp_path: Path) -> None:
+    calls: list[bool] = []
+
+    class RecordingTrainer(FakeTrainer):
+        def forward_loss_components(self, batch: object, *, retain_hooks_for_backward: bool = False) -> object:
+            calls.append(retain_hooks_for_backward)
+            return super().forward_loss_components(batch, retain_hooks_for_backward=retain_hooks_for_backward)
+
+    runner = _runner(tmp_path)
+    runner.trainer_factory = lambda arm_name, config, bank: RecordingTrainer(arm_name, config, bank)
+    runner.run()
+    assert any(first and second for first, second in pairwise(calls))
+    assert True in calls
+
+
+def test_eval_does_not_retain_hooks(tmp_path: Path) -> None:
+    calls: list[bool] = []
+
+    class RecordingTrainer(FakeTrainer):
+        def forward_loss_components(self, batch: object, *, retain_hooks_for_backward: bool = False) -> object:
+            calls.append(retain_hooks_for_backward)
+            return super().forward_loss_components(batch, retain_hooks_for_backward=retain_hooks_for_backward)
+
+    runner = _runner(tmp_path, steps=1)
+    runner.trainer_factory = lambda arm_name, config, bank: RecordingTrainer(arm_name, config, bank)
+    runner.run()
+    assert False in calls
 
 
 def test_prompt_cache_length_gate_reads_tensor(tmp_path: Path) -> None:

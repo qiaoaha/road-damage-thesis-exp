@@ -60,6 +60,12 @@ class RAALStats:
             return None
         return torch.stack([item.concentration_ratio for item in self.layer_stats]).mean()
 
+    def snapshot(self) -> RAALStats:
+        return RAALStats(
+            layer_stats=list(self.layer_stats),
+            layer_call_counts=dict(self.layer_call_counts),
+        )
+
 
 def raal_parameter_count() -> int:
     return 0
@@ -195,10 +201,12 @@ class RAALAttentionCollector:
         self.defect_text_mask = defect_text_mask
         self.stats = RAALStats()
         self._handles: list[Any] = []
+        self._closed = False
 
     def __enter__(self) -> Self:
         if not self.config.enabled:
             return self
+        self._closed = False
         blocks = cast(Any, self.transformer).transformer_blocks
         if not self.config.layer_indices:
             raise ValueError("RAAL layer_indices must not be empty")
@@ -210,9 +218,18 @@ class RAALAttentionCollector:
         return self
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self._closed:
+            return
         for handle in self._handles:
             handle.remove()
         self._handles.clear()
+        self._closed = True
+
+    def snapshot(self) -> RAALStats:
+        return self.stats.snapshot()
 
     def _make_hook(self, layer_index: int) -> Callable[[nn.Module, tuple[Any, ...], dict[str, Any]], None]:
         def hook(module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:

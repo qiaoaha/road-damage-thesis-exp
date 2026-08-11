@@ -23,6 +23,7 @@ class RAALLossComponents:
     weighted_raal_loss: torch.Tensor
     total_loss: torch.Tensor
     metrics: dict[str, float]
+    collector: RAALAttentionCollector | None = None
 
 
 SCHEDULE_FIELDS = ("step", "pool_index", "source_sample_id", "polarity")
@@ -34,7 +35,7 @@ class RealSD3RGDARAALTrainer(RealSD3RGDATrainer):
         self.raal_config = raal_config or RAALConfig()
         self.text_mask_bank = text_mask_bank
 
-    def forward_loss_components(self, batch: Any) -> RAALLossComponents:
+    def forward_loss_components(self, batch: Any, *, retain_hooks_for_backward: bool = False) -> RAALLossComponents:
         condition = RGDAConditionBatch(
             pseudo_clean_latents=batch.sample.pseudo_clean_latent,
             rg_maps=batch.sample.rg_map_latent,
@@ -63,7 +64,8 @@ class RealSD3RGDARAALTrainer(RealSD3RGDATrainer):
                     dtype=torch.bool,
                 ),
             )
-        with collector_ctx as collector:
+        collector = collector_ctx.__enter__()
+        try:
             raw_prediction = self.wrapper(
                 hidden_states=batch.noisy_latent,
                 encoder_hidden_states=batch.sample.prompt_embeds,
@@ -72,6 +74,12 @@ class RealSD3RGDARAALTrainer(RealSD3RGDATrainer):
                 rgda_condition=condition,
                 return_dict=True,
             ).sample
+            forward_stats = collector.snapshot()
+        except BaseException:
+            collector_ctx.close()
+            raise
+        if not retain_hooks_for_backward:
+            collector_ctx.close()
         self.runtime_state.forward_count += 1
         flow_config = getattr(self, "flow_config", FlowTrainingConfig())
         clean_latent = getattr(batch, "clean_latent", None)
@@ -91,7 +99,7 @@ class RealSD3RGDARAALTrainer(RealSD3RGDATrainer):
             self.runtime_state.record_nan_inf()
             raise FloatingPointError("prediction contains non-finite values")
         flow_loss = weighted_flow_matching_mse(prediction, target, batch.weighting)
-        raal_loss = collector.stats.loss
+        raal_loss = forward_stats.loss
         if raal_loss is None:
             raal_loss = flow_loss * 0.0
         weighted_raal_loss = raal_loss * float(self.raal_config.weight)
@@ -100,14 +108,21 @@ class RealSD3RGDARAALTrainer(RealSD3RGDATrainer):
             "flow_loss": float(flow_loss.detach().cpu()),
             "raal_loss": float(raal_loss.detach().cpu()),
             "weighted_raal_loss": float(weighted_raal_loss.detach().cpu()),
-            "raal_hook_count": float(collector.stats.hook_call_count),
-            "inside_attention_mass": float(collector.stats.inside_mass.detach().cpu()) if collector.stats.inside_mass is not None else 0.0,
-            "outside_attention_mass": float(collector.stats.outside_mass.detach().cpu()) if collector.stats.outside_mass is not None else 0.0,
-            "concentration_ratio": float(collector.stats.concentration_ratio.detach().cpu()) if collector.stats.concentration_ratio is not None else 0.0,
+            "raal_hook_count": float(forward_stats.hook_call_count),
+            "inside_attention_mass": float(forward_stats.inside_mass.detach().cpu()) if forward_stats.inside_mass is not None else 0.0,
+            "outside_attention_mass": float(forward_stats.outside_mass.detach().cpu()) if forward_stats.outside_mass is not None else 0.0,
+            "concentration_ratio": float(forward_stats.concentration_ratio.detach().cpu()) if forward_stats.concentration_ratio is not None else 0.0,
         }
-        for layer_index, count in collector.stats.layer_call_counts.items():
+        for layer_index, count in forward_stats.layer_call_counts.items():
             metrics[f"layer_{layer_index}_calls"] = float(count)
-        return RAALLossComponents(flow_loss, raal_loss, weighted_raal_loss, total_loss, metrics)
+        return RAALLossComponents(
+            flow_loss,
+            raal_loss,
+            weighted_raal_loss,
+            total_loss,
+            metrics,
+            collector if retain_hooks_for_backward and raal_enabled else None,
+        )
 
     def forward_loss(self, batch: Any) -> torch.Tensor:
         return self.forward_loss_components(batch).total_loss

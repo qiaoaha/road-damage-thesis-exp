@@ -218,7 +218,7 @@ class RealRAALPilotRunner:
             sample = trainer.load_cached_sample(row["cache_path"])
             batch = trainer.build_flow_batch(sample)
             if self.arm == "R1":
-                components = trainer.forward_loss_components(batch)
+                components = trainer.forward_loss_components(batch, retain_hooks_for_backward=not bool(sample.is_negative))
                 train_row = self._backward_raal_step(step, row, sample, trainer, components)
             else:
                 metrics = trainer.backward_step(batch)
@@ -284,6 +284,9 @@ class RealRAALPilotRunner:
         except torch.cuda.OutOfMemoryError:
             trainer.runtime_state.record_oom()
             raise
+        finally:
+            if components.collector is not None:
+                components.collector.close()
         gradients = trainer.gradient_report()
         return self._train_row(step, row, sample, components.metrics, gradients, float(grad_norm_raw.detach().cpu()))
 
@@ -495,14 +498,22 @@ class RealRAALPilotRunner:
         try:
             batch = next(batch for batch in fixed_eval if not batch.sample.is_negative)
             trainer.optimizer.zero_grad(set_to_none=True)
-            flow_components = trainer.forward_loss_components(batch)
-            torch.autograd.backward(flow_components.flow_loss)
+            flow_components = trainer.forward_loss_components(batch, retain_hooks_for_backward=True)
+            try:
+                torch.autograd.backward(flow_components.flow_loss)
+            finally:
+                if flow_components.collector is not None:
+                    flow_components.collector.close()
             grad_flow = _clone_grads(trainer.injector)
             trainer.optimizer.zero_grad(set_to_none=True)
-            total_components = trainer.forward_loss_components(batch)
+            total_components = trainer.forward_loss_components(batch, retain_hooks_for_backward=True)
             if not total_components.raal_loss.requires_grad:
                 raise RuntimeError("RAAL_GRAD_TO_RGDA_REAL_DIAGNOSTIC_FAIL")
-            torch.autograd.backward(total_components.total_loss)
+            try:
+                torch.autograd.backward(total_components.total_loss)
+            finally:
+                if total_components.collector is not None:
+                    total_components.collector.close()
             grad_total = _clone_grads(trainer.injector)
             if not _any_grad_delta(grad_flow, grad_total):
                 raise RuntimeError("RAAL_GRAD_TO_RGDA_REAL_DIAGNOSTIC_FAIL")
